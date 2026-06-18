@@ -24,6 +24,7 @@
 #include "quickjs-libc.h"
 #include "src/libs/tiny_ttf/lv_tiny_ttf.h"
 #include "src/drivers/sdl/lv_sdl_window.h"
+#include "src/widgets/calendar/lv_calendar_header_arrow.h"
 
 #include <SDL.h>
 
@@ -160,6 +161,49 @@ static int32_t parse_size(JSContext *ctx, JSValueConst v) {
     return n;
 }
 
+/* Parse "YYYY-MM-DD" or "YYYY-MM" → (y,m,d). Returns true on success.
+ * d may be NULL (for "YYYY-MM"); on success without a day component, *d is 1. */
+static bool parse_ymd(const char *s, uint32_t *y, uint32_t *m, uint32_t *d) {
+    if (!s) return false;
+    int yr = 0, mo = 0, dy = 1;
+    int n = sscanf(s, "%d-%d-%d", &yr, &mo, &dy);
+    if (n < 2 || yr <= 0 || mo <= 0) return false;
+    if (y) *y = (uint32_t)yr;
+    if (m) *m = (uint32_t)mo;
+    if (d) *d = (uint32_t)dy;
+    return true;
+}
+
+/* Buttonmatrix map storage
+ *
+ * lv_buttonmatrix_set_map() keeps the pointer; we must own the strings and the
+ * pointer array for the widget's lifetime, then free them on LV_EVENT_DELETE.
+ * LVGL terminates the map with an empty string "" (NOT NULL). "\n" entries
+ * separate rows. We attach the storage via lv_obj_set_user_data so we can find
+ * and free it later (buttonmatrix doesn't otherwise use user_data).
+ */
+typedef struct {
+    char       **strs;   /* owned: n entries, each strdup'd                 */
+    size_t       n;      /* number of map entries (excludes "" terminator)  */
+    const char **map;    /* n+1 entries; map[n] = "" (LVGL terminator)      */
+} btnmatrix_map_t;
+
+static void btnmatrix_map_free(btnmatrix_map_t *m) {
+    if (!m) return;
+    if (m->strs) {
+        for (size_t i = 0; i < m->n; i++) lv_free(m->strs[i]);
+        lv_free(m->strs);
+    }
+    lv_free(m->map);
+    lv_free(m);
+}
+
+static void btnmatrix_map_delete_cb(lv_event_t *e) {
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    btnmatrix_map_free((btnmatrix_map_t *)lv_obj_get_user_data(obj));
+    lv_obj_set_user_data(obj, NULL);
+}
+
 /* ── event callback bridge ──────────────────────────────────────────────── */
 
 typedef struct {
@@ -193,6 +237,23 @@ static JSValue widget_value_to_js(JSContext *ctx, lv_obj_t *obj) {
         return JS_NewInt32(ctx, (int32_t)lv_roller_get_selected(obj));
     if (cls == &lv_textarea_class)
         return JS_NewString(ctx, lv_textarea_get_text(obj));
+    if (cls == &lv_spinbox_class)
+        return JS_NewInt32(ctx, lv_spinbox_get_value(obj));
+    if (cls == &lv_buttonmatrix_class)
+        return JS_NewInt32(ctx, (int32_t)lv_buttonmatrix_get_selected_button(obj));
+    if (cls == &lv_calendar_class) {
+        lv_calendar_date_t d;
+        if (lv_calendar_get_pressed_date(obj, &d) == LV_RESULT_OK) {
+            JSValue o = JS_NewObject(ctx);
+            JS_SetPropertyStr(ctx, o, "year",  JS_NewInt32(ctx, d.year));
+            JS_SetPropertyStr(ctx, o, "month", JS_NewInt32(ctx, d.month));
+            JS_SetPropertyStr(ctx, o, "day",   JS_NewInt32(ctx, d.day));
+            return o;
+        }
+        return JS_UNDEFINED;
+    }
+    if (cls == &lv_tabview_class)
+        return JS_NewInt32(ctx, (int32_t)lv_tabview_get_tab_active(obj));
 
     return JS_UNDEFINED;
 }
@@ -232,6 +293,16 @@ static void lv_event_free(lv_event_t *e) {
 static void sg_container_ext_draw_cb(lv_event_t *e) {
     /* lv_event_set_ext_draw_size() already keeps the running maximum. */
     lv_event_set_ext_draw_size(e, SG_CONTAINER_EXT_DRAW);
+}
+
+/* Spinbox is built on lv_textarea, and the focus group forwards every
+ * keypress (digits, letters, …) to the textarea, which dutifully appends
+ * the character — busting the digit format. Spinbox only consumes the
+ * arrow keys itself. Block all character insertions on the underlying
+ * textarea so the display stays inside the configured digit format; the
+ * user steps the value with ←/→/↑/↓ (or by clicking the digits). */
+static void sg_spinbox_block_insert_cb(lv_event_t *e) {
+    lv_textarea_set_insert_replace(lv_event_get_target(e), "");
 }
 
 static void make_clean_container(lv_obj_t *obj) {
@@ -315,18 +386,59 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
     else if (strcmp(type, "Dropdown") == 0) obj = lv_dropdown_create(parent);
     else if (strcmp(type, "Roller")   == 0)
         obj = lv_roller_create(parent);
+    else if (strcmp(type, "Tabview")  == 0) {
+        obj = lv_tabview_create(parent);
+        /* Reasonable default tab bar height; can override via `tabBarSize`. */
+        lv_tabview_set_tab_bar_size(obj, 44);
+    }
+    else if (strcmp(type, "List")     == 0) obj = lv_list_create(parent);
+    else if (strcmp(type, "Spinbox")  == 0) {
+        obj = lv_spinbox_create(parent);
+        lv_spinbox_set_digit_format(obj, 5, 0);
+        lv_spinbox_set_range(obj, -99999, 99999);
+        lv_spinbox_set_step(obj, 1);
+        lv_obj_add_event_cb(obj, sg_spinbox_block_insert_cb,
+                            LV_EVENT_INSERT, NULL);
+        /* Each step calls lv_textarea_set_cursor_pos, which scrolls the
+         * cursor into view with LV_ANIM_ON, producing a visible jitter
+         * on every increment. LV_ANIM_ON honours LV_PART_MAIN's
+         * anim_duration; zeroing it disables the scroll animation while
+         * leaving the cursor blink (LV_PART_CURSOR) intact. */
+        lv_obj_set_style_anim_duration(obj, 0, LV_PART_MAIN);
+    }
+    else if (strcmp(type, "LED")      == 0) {
+        obj = lv_led_create(parent);
+        lv_led_on(obj);                /* default brightness = 255 (full on) */
+    }
+    else if (strcmp(type, "Chart")    == 0) {
+        obj = lv_chart_create(parent);
+    }
+    else if (strcmp(type, "ButtonMatrix") == 0) {
+        obj = lv_buttonmatrix_create(parent);
+        lv_obj_add_event_cb(obj, btnmatrix_map_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+    else if (strcmp(type, "Calendar") == 0) {
+        obj = lv_calendar_create(parent);
+        /* Built-in month-nav arrow header — most apps want it. */
+        lv_calendar_header_arrow_create(obj);
+    }
+    else if (strcmp(type, "Scale")    == 0) obj = lv_scale_create(parent);
+    else if (strcmp(type, "Span")     == 0) obj = lv_spangroup_create(parent);
     else                                    { obj = lv_obj_create(parent); make_clean_container(obj); }
 
     /* Make interactive widgets reachable by the keyboard/encoder group */
     if (g_group && obj &&
-        (strcmp(type, "Input")    == 0 ||
-         strcmp(type, "Button")   == 0 ||
-         strcmp(type, "Switch")   == 0 ||
-         strcmp(type, "Slider")   == 0 ||
-         strcmp(type, "Arc")      == 0 ||
-         strcmp(type, "Checkbox") == 0 ||
-         strcmp(type, "Dropdown") == 0 ||
-         strcmp(type, "Roller")   == 0)) {
+        (strcmp(type, "Input")        == 0 ||
+         strcmp(type, "Button")       == 0 ||
+         strcmp(type, "Switch")       == 0 ||
+         strcmp(type, "Slider")       == 0 ||
+         strcmp(type, "Arc")          == 0 ||
+         strcmp(type, "Checkbox")     == 0 ||
+         strcmp(type, "Dropdown")     == 0 ||
+         strcmp(type, "Roller")       == 0 ||
+         strcmp(type, "Spinbox")      == 0 ||
+         strcmp(type, "ButtonMatrix") == 0 ||
+         strcmp(type, "Calendar")     == 0)) {
         lv_group_add_obj(g_group, obj);
     }
 
@@ -507,6 +619,7 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         else if (cls == &lv_arc_class)      lv_arc_set_value(obj, v);
         else if (cls == &lv_dropdown_class) lv_dropdown_set_selected(obj, (uint32_t)v);
         else if (cls == &lv_roller_class)   lv_roller_set_selected(obj, (uint32_t)v, LV_ANIM_OFF);
+        else if (cls == &lv_spinbox_class)  lv_spinbox_set_value(obj, v);
     } else if (strcmp(key, "min") == 0) {
         int32_t v; JS_ToInt32(ctx, &v, argv[2]);
         const lv_obj_class_t *cls = lv_obj_get_class(obj);
@@ -552,6 +665,10 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
             lv_textarea_set_placeholder_text(obj, v ? v : "");
         JS_FreeCString(ctx, v);
     }
+    else if (strcmp(key, "oneLine") == 0) {
+        if (lv_obj_get_class(obj) == &lv_textarea_class)
+            lv_textarea_set_one_line(obj, JS_ToBool(ctx, argv[2]));
+    }
     /* ── Spinner: spinTime (ms per revolution). Arc length is a fixed
      * default; lv_spinner_set_anim_params() takes both at once. */
     else if (strcmp(key, "spinTime") == 0) {
@@ -561,6 +678,212 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
             if (v <= 0) v = 1000;
             lv_spinner_set_anim_params(obj, (uint32_t)v, SG_SPINNER_ARC_ANGLE);
         }
+    }
+    /* ── Spinbox ── */
+    else if (strcmp(key, "digits") == 0) {
+        /* "N" or "N.M" → digit_count=N, sep_pos=M (0 if no dot). */
+        const char *v = JS_ToCString(ctx, argv[2]);
+        if (v && lv_obj_get_class(obj) == &lv_spinbox_class) {
+            int dc = 0, sp = 0;
+            sscanf(v, "%d.%d", &dc, &sp);
+            if (dc <= 0) sscanf(v, "%d", &dc);
+            if (dc > 0) lv_spinbox_set_digit_format(obj, (uint32_t)dc, (uint32_t)sp);
+        }
+        JS_FreeCString(ctx, v);
+    } else if (strcmp(key, "step") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_spinbox_class && v > 0)
+            lv_spinbox_set_step(obj, (uint32_t)v);
+    }
+    /* ── LED ── */
+    else if (strcmp(key, "color") == 0) {
+        const char *v = JS_ToCString(ctx, argv[2]);
+        if (v && lv_obj_get_class(obj) == &lv_led_class)
+            lv_led_set_color(obj, parse_color(v));
+        JS_FreeCString(ctx, v);
+    } else if (strcmp(key, "brightness") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_led_class) {
+            if (v < 0) v = 0; if (v > 255) v = 255;
+            lv_led_set_brightness(obj, (uint8_t)v);
+        }
+    }
+    /* ── Chart ── */
+    else if (strcmp(key, "chartType") == 0) {
+        const char *v = JS_ToCString(ctx, argv[2]);
+        if (v && lv_obj_get_class(obj) == &lv_chart_class) {
+            lv_chart_type_t t = LV_CHART_TYPE_LINE;
+            if      (strcmp(v, "bar")     == 0) t = LV_CHART_TYPE_BAR;
+            else if (strcmp(v, "scatter") == 0) t = LV_CHART_TYPE_SCATTER;
+            else if (strcmp(v, "none")    == 0) t = LV_CHART_TYPE_NONE;
+            lv_chart_set_type(obj, t);
+        }
+        JS_FreeCString(ctx, v);
+    } else if (strcmp(key, "pointCount") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_chart_class && v > 0)
+            lv_chart_set_point_count(obj, (uint32_t)v);
+    } else if (strcmp(key, "rangeMin") == 0 || strcmp(key, "rangeMax") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_chart_class) {
+            int32_t lo = 0, hi = 100;
+            if (strcmp(key, "rangeMin") == 0) { lo = v; hi = v + 100; }
+            else                              { lo = 0; hi = v; }
+            lv_chart_set_range(obj, LV_CHART_AXIS_PRIMARY_Y, lo, hi);
+        }
+    } else if (strcmp(key, "divLines") == 0) {
+        /* "HxV" — e.g. "5x10" → 5 horizontal, 10 vertical division lines. */
+        const char *v = JS_ToCString(ctx, argv[2]);
+        if (v && lv_obj_get_class(obj) == &lv_chart_class) {
+            int h = 0, w = 0;
+            sscanf(v, "%dx%d", &h, &w);
+            lv_chart_set_div_line_count(obj, (uint8_t)h, (uint8_t)w);
+        }
+        JS_FreeCString(ctx, v);
+    }
+    /* ── ButtonMatrix: map = JS array of strings; "\n" entries start new row ── */
+    else if (strcmp(key, "map") == 0) {
+        if (lv_obj_get_class(obj) == &lv_buttonmatrix_class &&
+            JS_IsArray(ctx, argv[2])) {
+            uint32_t len = 0;
+            JSValue jlen = JS_GetPropertyStr(ctx, argv[2], "length");
+            JS_ToUint32(ctx, &len, jlen);
+            JS_FreeValue(ctx, jlen);
+
+            btnmatrix_map_t *m = lv_malloc(sizeof(*m));
+            m->n    = (size_t)len;
+            m->strs = lv_malloc(sizeof(char *) * (len + 1));
+            m->map  = lv_malloc(sizeof(const char *) * (len + 1));
+            for (uint32_t i = 0; i < len; i++) {
+                JSValue it = JS_GetPropertyUint32(ctx, argv[2], i);
+                const char *s = JS_ToCString(ctx, it);
+                m->strs[i] = s ? lv_strdup(s) : lv_strdup("");
+                m->map[i]  = m->strs[i];
+                JS_FreeCString(ctx, s);
+                JS_FreeValue(ctx, it);
+            }
+            m->map[len] = "";                          /* LVGL terminator */
+
+            btnmatrix_map_free((btnmatrix_map_t *)lv_obj_get_user_data(obj));
+            lv_obj_set_user_data(obj, m);
+            lv_buttonmatrix_set_map(obj, m->map);
+        }
+    } else if (strcmp(key, "oneChecked") == 0) {
+        if (lv_obj_get_class(obj) == &lv_buttonmatrix_class)
+            lv_buttonmatrix_set_one_checked(obj, JS_ToBool(ctx, argv[2]));
+    }
+    /* ── Calendar: today / shown as "YYYY-MM-DD" / "YYYY-MM" strings ── */
+    else if (strcmp(key, "today") == 0 || strcmp(key, "shown") == 0) {
+        const char *v = JS_ToCString(ctx, argv[2]);
+        uint32_t y = 0, mo = 0, d = 1;
+        if (v && lv_obj_get_class(obj) == &lv_calendar_class && parse_ymd(v, &y, &mo, &d)) {
+            if (strcmp(key, "today") == 0) lv_calendar_set_today_date(obj, y, mo, d);
+            else                           lv_calendar_set_showed_date(obj, y, mo);
+        }
+        JS_FreeCString(ctx, v);
+    }
+    /* ── Scale ── */
+    else if (strcmp(key, "scaleMode") == 0) {
+        const char *v = JS_ToCString(ctx, argv[2]);
+        if (v && lv_obj_get_class(obj) == &lv_scale_class) {
+            lv_scale_mode_t m = LV_SCALE_MODE_HORIZONTAL_BOTTOM;
+            if      (strcmp(v, "h-top")       == 0) m = LV_SCALE_MODE_HORIZONTAL_TOP;
+            else if (strcmp(v, "h-bottom")    == 0) m = LV_SCALE_MODE_HORIZONTAL_BOTTOM;
+            else if (strcmp(v, "v-left")      == 0) m = LV_SCALE_MODE_VERTICAL_LEFT;
+            else if (strcmp(v, "v-right")     == 0) m = LV_SCALE_MODE_VERTICAL_RIGHT;
+            else if (strcmp(v, "round-inner") == 0) m = LV_SCALE_MODE_ROUND_INNER;
+            else if (strcmp(v, "round-outer") == 0) m = LV_SCALE_MODE_ROUND_OUTER;
+            lv_scale_set_mode(obj, m);
+        }
+        JS_FreeCString(ctx, v);
+    } else if (strcmp(key, "totalTicks") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_scale_class && v > 0)
+            lv_scale_set_total_tick_count(obj, (uint32_t)v);
+    } else if (strcmp(key, "majorEvery") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_scale_class && v > 0)
+            lv_scale_set_major_tick_every(obj, (uint32_t)v);
+    } else if (strcmp(key, "showLabels") == 0) {
+        if (lv_obj_get_class(obj) == &lv_scale_class)
+            lv_scale_set_label_show(obj, JS_ToBool(ctx, argv[2]));
+    }
+    /* ── Spangroup: parts = [{text, color?, fontSize?}, ...] ── */
+    else if (strcmp(key, "parts") == 0) {
+        if (lv_obj_get_class(obj) == &lv_spangroup_class &&
+            JS_IsArray(ctx, argv[2])) {
+            while (lv_spangroup_get_span_count(obj) > 0) {
+                lv_span_t *sp = lv_spangroup_get_child(obj, 0);
+                if (!sp) break;
+                lv_spangroup_delete_span(obj, sp);
+            }
+            uint32_t len = 0;
+            JSValue jlen = JS_GetPropertyStr(ctx, argv[2], "length");
+            JS_ToUint32(ctx, &len, jlen);
+            JS_FreeValue(ctx, jlen);
+            for (uint32_t i = 0; i < len; i++) {
+                JSValue it    = JS_GetPropertyUint32(ctx, argv[2], i);
+                JSValue jtext = JS_GetPropertyStr(ctx, it, "text");
+                JSValue jcol  = JS_GetPropertyStr(ctx, it, "color");
+                JSValue jfs   = JS_GetPropertyStr(ctx, it, "fontSize");
+                JSValue jfont = JS_GetPropertyStr(ctx, it, "font");
+
+                const char *t = JS_ToCString(ctx, jtext);
+                lv_span_t *sp = lv_spangroup_new_span(obj);
+                lv_span_set_text(sp, t ? t : "");
+                JS_FreeCString(ctx, t);
+
+                if (!JS_IsUndefined(jcol)) {
+                    const char *cs = JS_ToCString(ctx, jcol);
+                    if (cs) {
+                        sg_color_t c = parse_color_ex(cs);
+                        lv_style_set_text_color(lv_span_get_style(sp), c.color);
+                        lv_style_set_text_opa(lv_span_get_style(sp), c.opa);
+                    }
+                    JS_FreeCString(ctx, cs);
+                }
+                if (JS_IsNumber(jfs)) {
+                    int32_t fs; JS_ToInt32(ctx, &fs, jfs);
+                    const lv_font_t *f = &lv_font_montserrat_14;
+                    if      (fs >= 24) f = &lv_font_montserrat_24;
+                    else if (fs >= 20) f = &lv_font_montserrat_20;
+                    else if (fs >= 16) f = &lv_font_montserrat_16;
+                    lv_style_set_text_font(lv_span_get_style(sp), f);
+                }
+                if (!JS_IsUndefined(jfont)) {
+                    int64_t h; JS_ToInt64(ctx, &h, jfont);
+                    if (h) lv_style_set_text_font(lv_span_get_style(sp),
+                                                  (const lv_font_t *)(uintptr_t)h);
+                }
+
+                JS_FreeValue(ctx, jtext);
+                JS_FreeValue(ctx, jcol);
+                JS_FreeValue(ctx, jfs);
+                JS_FreeValue(ctx, jfont);
+                JS_FreeValue(ctx, it);
+            }
+            lv_spangroup_refr_mode(obj);
+        }
+    }
+    /* ── Tabview ── */
+    else if (strcmp(key, "tabBarSize") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_tabview_class)
+            lv_tabview_set_tab_bar_size(obj, v);
+    } else if (strcmp(key, "tabBarPosition") == 0) {
+        const char *v = JS_ToCString(ctx, argv[2]);
+        if (v && lv_obj_get_class(obj) == &lv_tabview_class) {
+            lv_dir_t d = LV_DIR_TOP;
+            if      (strcmp(v, "bottom") == 0) d = LV_DIR_BOTTOM;
+            else if (strcmp(v, "left")   == 0) d = LV_DIR_LEFT;
+            else if (strcmp(v, "right")  == 0) d = LV_DIR_RIGHT;
+            lv_tabview_set_tab_bar_position(obj, d);
+        }
+        JS_FreeCString(ctx, v);
+    } else if (strcmp(key, "activeTab") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_tabview_class && v >= 0)
+            lv_tabview_set_active(obj, (uint32_t)v, LV_ANIM_OFF);
     }
 
     JS_FreeCString(ctx, key);
@@ -692,19 +1015,201 @@ static JSValue js_setDefaultFont(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* addTab(tabview, title) → page node handle. */
+static JSValue js_addTab(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    lv_obj_t   *tv    = js_to_obj(ctx, argv[0]);
+    const char *title = JS_ToCString(ctx, argv[1]);
+    lv_obj_t   *page  = lv_tabview_add_tab(tv, title ? title : "");
+    JS_FreeCString(ctx, title);
+    return obj_to_js(ctx, page);
+}
+
+/* listAddButton(list, text) → button node handle. Auto-added to focus group. */
+static JSValue js_listAddButton(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    lv_obj_t   *list = js_to_obj(ctx, argv[0]);
+    const char *text = JS_ToCString(ctx, argv[1]);
+    lv_obj_t   *btn  = lv_list_add_button(list, NULL, text ? text : "");
+    JS_FreeCString(ctx, text);
+    if (g_group && btn) lv_group_add_obj(g_group, btn);
+    return obj_to_js(ctx, btn);
+}
+
+/* chartAddSeries(chart, colorString) → series handle (int).
+ * Series are owned by the chart and freed when the chart is deleted. */
+static JSValue js_chartAddSeries(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    lv_obj_t   *chart = js_to_obj(ctx, argv[0]);
+    const char *col   = JS_ToCString(ctx, argv[1]);
+    lv_color_t  c     = col ? parse_color(col) : lv_palette_main(LV_PALETTE_BLUE);
+    JS_FreeCString(ctx, col);
+    lv_chart_series_t *ser = lv_chart_add_series(chart, c, LV_CHART_AXIS_PRIMARY_Y);
+    return JS_NewInt64(ctx, (int64_t)(uintptr_t)ser);
+}
+
+/* chartSetData(chart, series, [v0, v1, ...]) — replaces all points; resizes
+ * the chart's point count to match the array length. */
+static JSValue js_chartSetData(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_EXCEPTION;
+    lv_obj_t          *chart = js_to_obj(ctx, argv[0]);
+    int64_t            sh;    JS_ToInt64(ctx, &sh, argv[1]);
+    lv_chart_series_t *ser   = (lv_chart_series_t *)(uintptr_t)sh;
+    if (!ser || !JS_IsArray(ctx, argv[2])) return JS_UNDEFINED;
+
+    uint32_t len = 0;
+    JSValue jlen = JS_GetPropertyStr(ctx, argv[2], "length");
+    JS_ToUint32(ctx, &len, jlen);
+    JS_FreeValue(ctx, jlen);
+
+    if (len > 0 && lv_chart_get_point_count(chart) != len)
+        lv_chart_set_point_count(chart, len);
+
+    for (uint32_t i = 0; i < len; i++) {
+        JSValue it = JS_GetPropertyUint32(ctx, argv[2], i);
+        int32_t v; JS_ToInt32(ctx, &v, it);
+        lv_chart_set_value_by_id(chart, ser, i, v);
+        JS_FreeValue(ctx, it);
+    }
+    return JS_UNDEFINED;
+}
+
+/* showMsgbox({title, text, buttons:[str,...]}, onClose?)
+ * Opens a modal msgbox. onClose(idx) is called with the index of the clicked
+ * footer button, or -1 if the close button (X) was pressed. The msgbox closes
+ * itself on any button press. */
+typedef struct {
+    JSContext *ctx;
+    JSValue    on_close;
+    JSValue    button_indices;   /* array used to map button obj → index    */
+} msgbox_ctx_t;
+
+static void msgbox_button_cb(lv_event_t *e) {
+    msgbox_ctx_t *m = lv_event_get_user_data(e);
+    lv_obj_t     *btn = lv_event_get_current_target_obj(e);
+
+    int32_t idx = -1;
+    uint32_t n = 0;
+    JSValue jlen = JS_GetPropertyStr(m->ctx, m->button_indices, "length");
+    JS_ToUint32(m->ctx, &n, jlen);
+    JS_FreeValue(m->ctx, jlen);
+    for (uint32_t i = 0; i < n; i++) {
+        JSValue it = JS_GetPropertyUint32(m->ctx, m->button_indices, i);
+        int64_t ptr; JS_ToInt64(m->ctx, &ptr, it);
+        JS_FreeValue(m->ctx, it);
+        if ((lv_obj_t *)(uintptr_t)ptr == btn) { idx = (int32_t)i; break; }
+    }
+
+    JSValue arg = JS_NewInt32(m->ctx, idx);
+    JSValue ret = JS_Call(m->ctx, m->on_close, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(ret)) js_std_dump_error(m->ctx);
+    JS_FreeValue(m->ctx, ret);
+    JS_FreeValue(m->ctx, arg);
+
+    lv_obj_t *mbox = lv_obj_get_parent(lv_obj_get_parent(btn));
+    if (mbox && lv_obj_get_class(mbox) == &lv_msgbox_class)
+        lv_msgbox_close_async(mbox);
+}
+
+static void msgbox_close_cb(lv_event_t *e) {
+    msgbox_ctx_t *m = lv_event_get_user_data(e);
+    JSValue arg = JS_NewInt32(m->ctx, -1);
+    JSValue ret = JS_Call(m->ctx, m->on_close, JS_UNDEFINED, 1, &arg);
+    if (JS_IsException(ret)) js_std_dump_error(m->ctx);
+    JS_FreeValue(m->ctx, ret);
+    JS_FreeValue(m->ctx, arg);
+    lv_obj_t *mbox = lv_obj_get_parent(lv_obj_get_parent(lv_event_get_current_target_obj(e)));
+    if (mbox && lv_obj_get_class(mbox) == &lv_msgbox_class)
+        lv_msgbox_close_async(mbox);
+}
+
+static void msgbox_delete_cb(lv_event_t *e) {
+    msgbox_ctx_t *m = lv_event_get_user_data(e);
+    if (!m) return;
+    JS_FreeValue(m->ctx, m->on_close);
+    JS_FreeValue(m->ctx, m->button_indices);
+    lv_free(m);
+}
+
+static JSValue js_showMsgbox(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsObject(argv[0])) return JS_EXCEPTION;
+
+    JSValue jtitle = JS_GetPropertyStr(ctx, argv[0], "title");
+    JSValue jtext  = JS_GetPropertyStr(ctx, argv[0], "text");
+    JSValue jbtns  = JS_GetPropertyStr(ctx, argv[0], "buttons");
+
+    const char *title = JS_ToCString(ctx, jtitle);
+    const char *text  = JS_ToCString(ctx, jtext);
+
+    lv_obj_t *mbox = lv_msgbox_create(NULL);
+    if (title) lv_msgbox_add_title(mbox, title);
+    if (text)  lv_msgbox_add_text(mbox, text);
+    lv_obj_t *close_btn = lv_msgbox_add_close_button(mbox);
+
+    msgbox_ctx_t *mctx = lv_malloc(sizeof(*mctx));
+    mctx->ctx            = ctx;
+    mctx->on_close       = (argc >= 2) ? JS_DupValue(ctx, argv[1])
+                                       : JS_UNDEFINED;
+    mctx->button_indices = JS_NewArray(ctx);
+
+    if (JS_IsArray(ctx, jbtns)) {
+        uint32_t n = 0;
+        JSValue jlen = JS_GetPropertyStr(ctx, jbtns, "length");
+        JS_ToUint32(ctx, &n, jlen);
+        JS_FreeValue(ctx, jlen);
+        for (uint32_t i = 0; i < n; i++) {
+            JSValue it = JS_GetPropertyUint32(ctx, jbtns, i);
+            const char *btxt = JS_ToCString(ctx, it);
+            lv_obj_t *b = lv_msgbox_add_footer_button(mbox, btxt ? btxt : "");
+            JS_FreeCString(ctx, btxt);
+            JS_FreeValue(ctx, it);
+            JS_SetPropertyUint32(ctx, mctx->button_indices, i,
+                                 JS_NewInt64(ctx, (int64_t)(uintptr_t)b));
+            if (!JS_IsUndefined(mctx->on_close))
+                lv_obj_add_event_cb(b, msgbox_button_cb, LV_EVENT_CLICKED, mctx);
+        }
+    }
+    if (!JS_IsUndefined(mctx->on_close) && close_btn)
+        lv_obj_add_event_cb(close_btn, msgbox_close_cb, LV_EVENT_CLICKED, mctx);
+    lv_obj_add_event_cb(mbox, msgbox_delete_cb, LV_EVENT_DELETE, mctx);
+
+    JS_FreeCString(ctx, title);
+    JS_FreeCString(ctx, text);
+    JS_FreeValue(ctx, jtitle);
+    JS_FreeValue(ctx, jtext);
+    JS_FreeValue(ctx, jbtns);
+
+    return obj_to_js(ctx, mbox);
+}
+
 /* ── module export list ─────────────────────────────────────────────────── */
 
 static const JSCFunctionListEntry lv_funcs[] = {
-    JS_CFUNC_DEF("getScreen",    0, js_getScreen),
-    JS_CFUNC_DEF("createNode",   1, js_createNode),
-    JS_CFUNC_DEF("appendChild",  2, js_appendChild),
-    JS_CFUNC_DEF("removeChild",  2, js_removeChild),
-    JS_CFUNC_DEF("setProperty",  3, js_setProperty),
-    JS_CFUNC_DEF("getProperty",  2, js_getProperty),
-    JS_CFUNC_DEF("addEvent",     3, js_addEvent),
-    JS_CFUNC_DEF("dispose",      1, js_dispose),
-    JS_CFUNC_DEF("loadFont",     2, js_loadFont),
+    JS_CFUNC_DEF("getScreen",      0, js_getScreen),
+    JS_CFUNC_DEF("createNode",     1, js_createNode),
+    JS_CFUNC_DEF("appendChild",    2, js_appendChild),
+    JS_CFUNC_DEF("removeChild",    2, js_removeChild),
+    JS_CFUNC_DEF("setProperty",    3, js_setProperty),
+    JS_CFUNC_DEF("getProperty",    2, js_getProperty),
+    JS_CFUNC_DEF("addEvent",       3, js_addEvent),
+    JS_CFUNC_DEF("dispose",        1, js_dispose),
+    JS_CFUNC_DEF("loadFont",       2, js_loadFont),
     JS_CFUNC_DEF("setDefaultFont", 1, js_setDefaultFont),
+    JS_CFUNC_DEF("addTab",         2, js_addTab),
+    JS_CFUNC_DEF("listAddButton",  2, js_listAddButton),
+    JS_CFUNC_DEF("chartAddSeries", 2, js_chartAddSeries),
+    JS_CFUNC_DEF("chartSetData",   3, js_chartSetData),
+    JS_CFUNC_DEF("showMsgbox",     2, js_showMsgbox),
 };
 
 static int lv_module_init(JSContext *ctx, JSModuleDef *m) {
