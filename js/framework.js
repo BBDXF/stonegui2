@@ -82,6 +82,11 @@ function bindProp(native, key, value) {
 function applyProp(native, key, value) {
     if (key === "children") return;
 
+    if (key === "ref" && typeof value === "function") {
+        value(native);
+        return;
+    }
+
     /* Style object: bind each entry (each may itself be reactive) */
     if (key === "style") {
         if (value) {
@@ -105,6 +110,34 @@ function mountVNode(vnode, parentNative) {
     if (vnode.type === Fragment) {
         for (const child of vnode.children) mountChild(child, parentNative);
         return parentNative;
+    }
+
+    /* Tabview pages and List buttons are composite widgets that LVGL builds
+     * from inside the parent (lv_tabview_add_tab / lv_list_add_button) — they
+     * cannot be created via createNode/appendChild because their real parent
+     * is an internal sub-object. The framework handles them by calling the
+     * dedicated bridge function and then mounting children into the result. */
+    if (vnode.type === "Tab") {
+        const title  = vnode.props.title ?? "";
+        const native = lv.addTab(parentNative, String(title));
+        vnode.native = native;
+        for (const [k, v] of Object.entries(vnode.props)) {
+            if (k === "title") continue;
+            applyProp(native, k, v);
+        }
+        for (const child of vnode.children) mountChild(child, native);
+        return native;
+    }
+    if (vnode.type === "ListButton") {
+        const text   = vnode.props.text ?? "";
+        const native = lv.listAddButton(parentNative, String(text));
+        vnode.native = native;
+        for (const [k, v] of Object.entries(vnode.props)) {
+            if (k === "text") continue;
+            applyProp(native, k, v);
+        }
+        for (const child of vnode.children) mountChild(child, native);
+        return native;
     }
 
     const native = lv.createNode(vnode.type);
@@ -141,19 +174,30 @@ export const Fragment = Symbol("Fragment");
 /* Lowercase JSX tags map to host widgets (React-DOM convention:
  * lowercase = host element, Capitalized = component). */
 const HOST_TAGS = {
-    view:     "View",
-    text:     "Text",
-    button:   "Button",
-    image:    "Image",
-    input:    "Input",
-    switch:   "Switch",
-    progress: "Progress",
-    slider:   "Slider",
-    arc:      "Arc",
-    spinner:  "Spinner",
-    checkbox: "Checkbox",
-    dropdown: "Dropdown",
-    roller:   "Roller",
+    view:         "View",
+    text:         "Text",
+    button:       "Button",
+    image:        "Image",
+    input:        "Input",
+    switch:       "Switch",
+    progress:     "Progress",
+    slider:       "Slider",
+    arc:          "Arc",
+    spinner:      "Spinner",
+    checkbox:     "Checkbox",
+    dropdown:     "Dropdown",
+    roller:       "Roller",
+    tabview:      "Tabview",
+    tab:          "Tab",
+    list:         "List",
+    listButton:   "ListButton",
+    spinbox:      "Spinbox",
+    led:          "LED",
+    chart:        "Chart",
+    buttonMatrix: "ButtonMatrix",
+    calendar:     "Calendar",
+    scale:        "Scale",
+    span:         "Span",
 };
 
 /**
@@ -197,6 +241,26 @@ export function setDefaultFont(handle) {
  *   getProperty(node, "value" | "checked" | "text"). */
 export function getProperty(node, key) {
     return lv.getProperty(node, key);
+}
+
+/** Add a Chart series. Color is a stonegui color string ("#rrggbb" or named).
+ *  Returns an opaque handle to pass to chartSetData. */
+export function chartAddSeries(chart, color) {
+    return lv.chartAddSeries(chart, color);
+}
+
+/** Replace a Chart series' points with `data` (number[]). Chart point count
+ *  is resized to data.length. */
+export function chartSetData(chart, series, data) {
+    return lv.chartSetData(chart, series, data);
+}
+
+/** Open a modal message box.
+ *    opts: { title?: string, text?: string, buttons?: string[] }
+ *    onClose(idx): called with the index of the clicked footer button,
+ *                  or -1 if the close (X) button was pressed. */
+export function showMsgbox(opts, onClose) {
+    return lv.showMsgbox(opts, onClose ?? (() => {}));
 }
 
 /* ── Mount ──────────────────────────────────────────────────────────────── */

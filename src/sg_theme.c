@@ -187,6 +187,10 @@ static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
         lv_obj_add_style(obj, &st_field_placeholder,
                          LV_PART_TEXTAREA_PLACEHOLDER);
     }
+    else if (cls == &lv_spinbox_class) {
+        lv_obj_add_style(obj, &st_field, 0);
+        lv_obj_add_style(obj, &st_field_focused, LV_STATE_FOCUSED);
+    }
     else if (cls == &lv_switch_class) {
         lv_obj_add_style(obj, &st_sw_bg, 0);
         lv_obj_add_style(obj, &st_sw_bg_on, LV_STATE_CHECKED);
