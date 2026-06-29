@@ -1,3 +1,24 @@
+> # ⚠️ ARCHIVED — original design vision, not current docs
+>
+> This file is the **initial design brief** that birthed stonegui (then
+> called *LVUI*). The current implementation has diverged on multiple points:
+>
+> | This doc says     | Reality                                            |
+> | ----------------- | -------------------------------------------------- |
+> | Project name      | **stonegui** (not LVUI)                            |
+> | Language          | Plain JavaScript + `.d.ts` (not TypeScript runtime) |
+> | Layout            | Single repo (no `packages/` monorepo)              |
+> | Backend           | SDL2 only (Wayland still planned, not built)       |
+> | Hot reload        | Not implemented                                    |
+> | Solid/Preact      | Not implemented (framework.js IS the only adapter) |
+>
+> Read [`README.md`](../README.md) for what actually ships and
+> [`AGENTS.md`](../AGENTS.md) for codebase orientation. Keeping this file
+> for historical context only — do not treat any prescription here as a
+> requirement.
+
+---
+
 # Project: LVUI (React Native for LVGL)
 
 ## Goal

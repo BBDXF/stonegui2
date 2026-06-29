@@ -7,21 +7,34 @@ only covers things an agent would otherwise miss.
 ## Layout & sources of truth
 
 ```
-src/main.c          host: LVGL/SDL boot, QuickJS runtime, event loop
-src/lv_bindings.c   *the* renderer surface — exposes module "lvgl" to JS
-src/sg_theme.c      Material-ish theme layered over LVGL's default theme
-js/framework.js     reactive core: createSignal/createEffect, h(), render()
-lv_conf.h           LVGL build config (CMake passes its path to LVGL)
-examples/hello      hyperscript demo — runs as-is (no build step)
-examples/jsx        JSX demo — must be transpiled with esbuild
-doc/prompts.md      ORIGINAL DESIGN DOC, partly stale (see "Stale" below)
-third_party/lvgl    LVGL 9.2 — vendored, NOT a git submodule
-third_party/quickjs QuickJS 2025-09-13 — vendored, NOT a git submodule
-conanfile.txt       empty — present but unused; do not rely on it
+src/main.c                host: LVGL/SDL boot, QuickJS runtime, event loop,
+                          inotify-driven hot reload, SDL_QUIT/SIGINT shutdown
+src/lv_bindings.c         *the* renderer surface — exposes module "lvgl" to JS
+src/sg_theme.c            Material-ish theme over LVGL's default theme
+js/framework.js           reactive core: signals/effects/memo/owner/batch,
+                          h(), render(), <Show>, <For>, createAnimation
+js/framework.d.ts         TypeScript types for the JS API + JSX intrinsics
+                          (IDE IntelliSense; not used at runtime)
+lv_conf.h                 LVGL build config (CMake passes its path to LVGL)
+examples/hello            hyperscript MVP demo
+examples/jsx              JSX demo — must be transpiled with esbuild
+examples/test             framework unit tests (36 assertions)
+examples/image            <image src> PNG decoder smoke test
+examples/anim             createAnimation smoke test
+doc/prompts.md            ORIGINAL DESIGN DOC, ARCHIVED with banner
+CMakeLists.txt            pins LVGL v9.2.2 + QuickJS commit 4c722ce
+                          (VERSION 2025-09-13) via FetchContent →
+                          build/_deps/{lvgl,quickjs}-src/ on first configure
+.github/workflows/ci.yml  build + Xvfb boot smoke test (asserts exit 143)
 ```
 
-`.gitignore` lists `third_party/` but those trees are in fact committed.
-Don't try `git submodule update`.
+LVGL and QuickJS are **not vendored, not a submodule** — they live in
+`build/_deps/` after `cmake -S . -B build`. First configure takes ~60–120 s
+because of the GitHub clones; subsequent configures reuse the cache. To
+hack on upstream or work offline, pass
+`-DSTONEGUI_LVGL_SOURCE_DIR=/path/to/lvgl` and/or
+`-DSTONEGUI_QUICKJS_SOURCE_DIR=/path/to/quickjs` to point at a local
+checkout.
 
 ## Build, run, iterate
 
@@ -29,18 +42,19 @@ Don't try `git submodule update`.
 cmake -S . -B build && cmake --build build      # produces ./build/stonegui
 ./build/stonegui                                # runs examples/hello/app.js
 ./build/stonegui examples/jsx/app.js            # other bundle
-./test_jsx.sh                                   # full pipeline: cmake + jsx build + run
-./test_jsx.sh --build                           # build only, don't launch
-./test_jsx.sh --run                             # launch existing binary only
+./build/stonegui --no-watch examples/test/app.js  # disable hot reload
+./test_jsx.sh                                   # full cmake + jsx + run pipeline
 ```
 
-- Requires `pkg-config sdl2`. Linux/X11 (SDL2) only; Wayland is a *plan*, not implemented.
+- Requires `pkg-config sdl2`. Linux/X11 (SDL2) only; Wayland still planned.
 - CMake POST_BUILD copies `js/` and `examples/` into `build/`. The binary
   resolves imports relative to its CWD, so run from the repo root or `build/`.
 - After editing `examples/jsx/app.jsx`, regenerate `app.js` via `npm run build`
   inside `examples/jsx/` (esbuild). `app.js` is committed so the demo runs
   without `npm install`; `node_modules/` and `package-lock.json` are gitignored.
-- No tests, no CI, no formatter, no linter, no TypeScript. Don't go looking.
+- **No formatter, no linter.** CI is a single build + headless boot smoke test
+  (asserts exit code 143 on SIGTERM). Type-checking via `tsc --strict` on
+  `framework.d.ts` only.
 
 ## Adding a widget / prop / event (multi-file change)
 
@@ -51,44 +65,94 @@ Every JS-visible LVGL feature crosses two files. Touch both, in this order:
      to `g_group` if the keyboard focus group should reach it.
    - `js_setProperty`: add a `strcmp` branch translating the JS prop into
      `lv_obj_set_*` / `lv_<widget>_set_*`. For colours go through
-     `parse_color_ex`; for sizes through `parse_size` (handles `"100%"`,
-     `"fill"`, raw px).
+     `parse_color_ex`; for sizes through `parse_size`. Pass `selector`
+     (NOT hardcoded `0`) so pseudo-state styles work.
    - `widget_value_to_js`: if the widget has a "current value" returnable to
      `onChange(value)` / `getProperty`.
-   - `js_addEvent`: only if a new event-name mapping is needed (most reuse
-     `change`/`click`/`longpress`/`focus`/`blur`).
-2. `js/framework.js` `HOST_TAGS`: add the lowercase JSX tag → canonical name
-   mapping. (`Capitalized` tags already work via the canonical name.)
+   - `js_addEvent`: only if a new event-name mapping is needed.
+2. `js/framework.js` `HOST_TAGS`: add the lowercase JSX tag → canonical name.
+3. `js/framework.d.ts`: add a `*Props` interface + `JSX.IntrinsicElements` entry
+   so VS Code IntelliSense catches typos.
 
 Style props are NOT a separate system — they are just keys handled in
-`js_setProperty`. There is no CSS parser and no selector engine; do not add
-one (explicitly forbidden by the design doc).
+`js_setProperty`. **No CSS parser, no selector engine** (forbidden by design).
 
 ## Reactivity contract (don't break this)
 
 The tree is mounted **once**. Any prop value that is a `function` is treated
 as a reactive accessor: `bindProp` wraps the call in `createEffect` so a
-signal change runs a single `lv.setProperty(node, key, value())`. Widgets
-are never destroyed and recreated. Implication when reviewing JS:
+signal change runs a single `lv.setProperty(node, key, value(), state?)`.
+Widgets are never destroyed and recreated by the static path.
 
 - `<Text text={count}/>` — reactive (signal getter). Updates the label only.
-- `<Text text={count()}/>` — *not* reactive: the value is read once at mount.
-- `removeChild` / `dispose` are exported from C but not used from JS today;
-  there is no list-keyed reconciliation. Don't assume one exists.
+- `<Text text={count()}/>` — *not* reactive: value read once at mount.
+- Owner tree: every effect runs inside an `Owner`. `render()` returns
+  `dispose()` that recursively tears the subtree down (runs `onCleanup`
+  callbacks, unsubscribes from signals, fires `lv.dispose` for `<For>` /
+  `<Show>` widgets).
+- Cleanup contract is encoded in [`createEffect`](js/framework.js): the
+  marker cleanup on `currentOwner.cleanups` is what flips `disposed=true`
+  and unsubscribes from `sources`. **Don't "simplify" it away.**
+- Imperative escape hatches: reactivity is one-way (signals → widget).
+  To READ a widget's current state use `getProperty(node, "value"|"checked"|"text")`.
+  To get the native handle for one-time imperative setup — Chart series,
+  imperative `setMenuPage` — pass `ref={n => ...}`.
+
+### `<Show>` / `<For>` gotchas
+
+- `<For each={…} key={…}>{(item, i) => <X/>}</For>` — children **must be a
+  render function**. Each row gets its own orphan `createRoot` so re-running
+  the For effect doesn't cascade-dispose surviving rows.
+- `<Show when={…}>{() => <X/>}</Show>` — for per-mount component lifecycle
+  (Tracker-style `onCleanup` that fires on every toggle), the child **must
+  be a function**. Static VNode children mount/unmount the widget but the
+  component body only runs once at the initial JSX evaluation.
+
+## Pseudo-state styles
+
+```jsx
+<button style={{
+    backgroundColor: "#3498db",
+    hover:    { backgroundColor: "#5dade2" },
+    pressed:  { backgroundColor: "#2980b9" },
+    focus:    { borderWidth: 2 },
+    disabled: { backgroundColor: "#7f8c8d" },
+}} />
+```
+
+The 4 pseudo-state strings are mirrored across two places:
+
+- [`framework.js`](js/framework.js): `PSEUDO_STATES` Set in `applyProp`
+- [`lv_bindings.c`](src/lv_bindings.c) `js_setProperty`: the state parser at
+  the top maps the string to an `lv_style_selector_t` (LV_STATE_HOVERED etc.)
+  that every `lv_obj_set_style_*` call passes as the selector.
+
+**Adding a new pseudo-state requires editing both places.**
 
 ## Fonts (two distinct systems — keep them straight)
 
 - `fontSize: 14|16|20|24` → built-in **Latin Montserrat**, compiled into
   `lv_conf.h`. CJK shows as tofu.
 - `font: handle` where `handle = loadFont(path, sizePx)` → **Tiny-TTF**,
-  any size, supports CJK. One handle per pixel size you need. CJK fonts
-  automatically fall back to the matching Montserrat for `LV_SYMBOL_*`
-  glyphs (checkbox tick, dropdown arrow); without that fallback you'd see
-  tofu for the symbols.
+  any size, supports CJK. One handle per pixel size. CJK fonts automatically
+  fall back to the matching Montserrat for `LV_SYMBOL_*` glyphs (checkbox
+  tick, dropdown arrow); without that fallback you'd see tofu for symbols.
 - `setDefaultFont(handle)` reapplies `sg_theme` with that font, so every
-  widget inherits it unless it overrides `font`. Call it once at startup.
+  widget inherits it unless it overrides `font`. Call once at startup.
 - The font-file buffer passed to Tiny-TTF is **intentionally never freed**
   (the font references it for its lifetime). Don't add a free.
+
+## Images (`<image src>`)
+
+`lv_conf.h` enables LVGL's bundled decoders — **zero system dependencies**:
+
+- `LV_USE_LODEPNG` — PNG
+- `LV_USE_TJPGD` — JPEG
+- `LV_USE_BMP` — BMP
+- `LV_USE_FS_POSIX` with `LV_FS_POSIX_LETTER='A'` — file paths via `"A:/abs/path/to/file.png"`
+
+GIF is *not* an image decoder in LVGL — it's a separate animation widget
+(`lv_gif_create`), currently unbound.
 
 ## CJK input plumbing (fragile)
 
@@ -96,9 +160,9 @@ are never destroyed and recreated. Implication when reviewing JS:
 because the default emits one byte at a time, corrupting multi-byte UTF-8.
 The `sg_sdl_kb_t` struct mirrors the layout of LVGL's private SDL keyboard
 driver (`char buf[KEYBOARD_BUFFER_SIZE]; bool dummy_read;`). **If you bump
-LVGL, re-verify this layout** in `third_party/lvgl/src/drivers/sdl/`. IME
-candidate-window placement uses `SDL_SetTextInputRect` from
-`sg_update_ime_rect` in `lv_bindings.c`.
+the LVGL pin in `CMakeLists.txt`, re-verify this layout** in
+`build/_deps/lvgl-src/src/drivers/sdl/`. IME candidate-window placement uses
+`SDL_SetTextInputRect` from `sg_update_ime_rect` in `lv_bindings.c`.
 
 ## Colours, sizes, layout — small but easy-to-miss specifics
 
@@ -112,28 +176,42 @@ candidate-window placement uses `SDL_SetTextInputRect` from
 - `flexFlow` is `"row" | "column"` only; `gap`, `alignItems`,
   `justifyContent` (CSS naming) all live in `js_setProperty`.
 
-## Stale / aspirational content (don't trust at face value)
+## Hot reload (inotify, Linux only)
 
-- `doc/prompts.md` still calls the project **"LVUI"**, prescribes
-  TypeScript/Solid/Preact adapters, a `packages/` monorepo, and hot
-  reload — **none of that exists**. It's the original vision, not the code.
-- README's component table still lists 7 widgets; the bindings now ship 23.
-  See [`HOST_TAGS`](file:///home/andy/learn/stonegui/js/framework.js) and
-  [`js_createNode`](file:///home/andy/learn/stonegui/src/lv_bindings.c) for
-  the authoritative list (View, Text, Button, Image, Input, Switch, Progress,
-  Slider, Arc, Spinner, Checkbox, Dropdown, Roller, Tabview, Tab, List,
-  ListButton, Spinbox, LED, Chart, ButtonMatrix, Calendar, Scale, Span).
-  All are exercised in [`examples/jsx/app.jsx`](file:///home/andy/learn/stonegui/examples/jsx/app.jsx).
+`main.c` watches the bundle's **parent directory** with `IN_CLOSE_WRITE |
+IN_MOVED_TO | IN_MODIFY` (not the file directly — most editors do
+`write tmpfile + rename` and would orphan an inode watch). Events filtered by
+filename. On change: `lv_obj_clean(scr) → js_std_free_handlers →
+JS_FreeContext → JS_FreeRuntime → boot new runtime → load_and_run`.
+
+**Order matters and is encoded in [`main.c`](src/main.c)**: `lv_obj_clean`
+runs BEFORE `JS_FreeContext` because LV_EVENT_DELETE handlers (registered
+in `lv_bindings.c` per widget) call back into the JS context to free
+callback values. Reversing the order = use-after-free on first save.
+
+After a reload all JS state is fresh: signals reset, `loadFont` handles are
+leaked (intentional — Tiny-TTF references the buffer for its lifetime), the
+bundle re-runs from the top. LVGL state survives: window, theme, input
+devices, focus group.
+
+Disable with `--no-watch` CLI flag.
 
 ## Composite widgets that bypass createNode/appendChild
 
-`Tab` and `ListButton` have no `js_createNode` branch. LVGL builds them via
-composite calls (`lv_tabview_add_tab`, `lv_list_add_button`) whose true
-parent is an internal sub-object you cannot reach with `appendChild`.
-Both are special-cased in `mountVNode` in `js/framework.js`, which calls
-`lv.addTab` / `lv.listAddButton` and mounts children into the returned
-handle. **When adding more composite widgets (e.g. Menu pages, Msgbox
-buttons), follow the same pattern.**
+`Tab`, `ListButton`, and `MenuPage` have no `js_createNode` branch. LVGL
+builds them via composite calls (`lv_tabview_add_tab`, `lv_list_add_button`,
+`lv_menu_page_create`) whose true parent is an internal sub-object you
+cannot reach with `appendChild`.
+
+All three are special-cased in `mountVNode` in `js/framework.js`: it pulls
+one construction prop off the VNode (`title` for Tab/MenuPage, `text` for
+ListButton), calls the dedicated bridge function (`lv.addTab` /
+`lv.listAddButton` / `lv.menuAddPage`), then applies the remaining props
+and mounts children into the returned handle.
+
+`lv.menuAddPage` auto-activates the FIRST page added (uses `lv_obj_get_user_data`
+on the menu as a "page already set" flag), so a static `<menu>` with pages
+renders something without manual `setMenuPage`.
 
 Msgbox does not have a declarative form at all — use the imperative
 `showMsgbox({title, text, buttons}, onClose)` helper exported from
@@ -141,43 +219,67 @@ Msgbox does not have a declarative form at all — use the imperative
 
 Chart series are also imperative: `chartAddSeries(chart, color)` returns
 a handle, `chartSetData(chart, series, [...])` replaces points. Typical
-usage is from a `ref={node => ...}` callback on the `<chart>` element
-(framework.js calls the ref with the native handle during mount).
+usage is from a `ref={node => ...}` callback on the `<chart>` element.
 
-## ButtonMatrix map lifetime
+## Owned-pointer lifetimes (LVGL keeps the pointer)
 
-`lv_buttonmatrix_set_map` keeps the pointer it is given — the strings AND
-the pointer array must outlive the widget. The `map` prop allocates a
-`btnmatrix_map_t` (strdup'd strings + a NULL-terminated pointer array) and
-attaches it to the widget via `lv_obj_set_user_data`. A `LV_EVENT_DELETE`
-handler (`btnmatrix_map_delete_cb`) frees it. **LVGL's map terminator is
-`""` (empty string), NOT `NULL` — don't "clean up" that sentinel.**
+Three widgets receive arrays from JS that LVGL stores **by reference** (no
+copy). Each allocates a heap struct, attaches it via `lv_obj_set_user_data`,
+and frees on `LV_EVENT_DELETE`. **Do not "simplify" the strdup/delete
+pattern** — the widget would dereference freed memory on next paint.
 
-## Known gaps (what the project is missing today)
+- ButtonMatrix `map` → `btnmatrix_map_t` (`""` terminator, NOT NULL — don't
+  "clean up" that sentinel).
+- Line `points` → `sg_line_pts_t` (parallel structure).
+- Msgbox callbacks → `msgbox_ctx_t` (holds JSValue refs).
 
-If asked to extend the project, these are the obvious holes — none of them
-is done, none has a stub:
+## Animation API
 
-- **Hot reload** — planned in README/design doc, not started. `main.c` has
-  no file watcher and re-runs the bundle once.
-- **Wayland backend** — README mentions it; only `lv_sdl_window_create` is
-  wired in `main.c`.
-- **TypeScript / `.d.ts`** — design doc assumes TS; codebase is plain JS.
-- **List rendering with stable identity** — `removeChild`/`dispose` are
-  exposed but unused; framework.js does no keyed diffing.
-- **Tests / CI / formatter / linter** — none.
-- **Clean shutdown** — `main()`'s loop is `while(1)`; the `JS_FreeContext`
-  / `JS_FreeRuntime` after it is unreachable.
-- **`conanfile.txt`** — empty. Either fill it or delete it.
-- **README components table** — out of sync with `HOST_TAGS` (lists 7,
-  ships 23). Demo in `examples/jsx/app.jsx` covers all of them.
-- **Framework adapters (Solid/Preact)** — design goal; not started. The
-  current `framework.js` *is* the renderer + the (only) adapter in one file.
+```js
+createAnimation(node, {
+    property:   "x" | "y" | "width" | "height" | "opacity"
+              | "rotation" | "scale" | "value",
+    from: 0, to: 100, duration: 200,
+    easing: "ease-out", delay: 0, repeat: 1,
+    onComplete: () => {},
+});
+```
+
+`x/y/width/height` cast `lv_obj_set_*` directly to `lv_anim_exec_xcb_t`; the
+rest go through `anim_exec_*` wrappers — opacity/rotation/scale need a
+selector, `value` dispatches by widget class. `LV_ANIM_REPEAT_INFINITE` is
+the string `"infinite"` from JS. Per-anim heap struct (`sg_anim_cb_t`) freed
+in `lv_anim_set_deleted_cb` so callbacks survive both completion AND
+cancellation.
+
+## Stale / aspirational content (don't trust at face value)
+
+- `doc/prompts.md` is the ORIGINAL design vision (then called *LVUI*), now
+  carries an ARCHIVED banner at top. None of its prescriptions (TS runtime,
+  `packages/` monorepo, hot reload as a future, etc.) reflect current code.
+- README's component table now matches `HOST_TAGS` (28 lowercase host tags).
+  See [`HOST_TAGS`](js/framework.js) and [`js_createNode`](src/lv_bindings.c)
+  for the canonical list. All 28 are exercised across
+  [`examples/jsx/app.jsx`](examples/jsx/app.jsx) (23 widgets),
+  [`examples/image/app.js`](examples/image/app.js) (Image),
+  [`examples/test/app.js`](examples/test/app.js) (Line, Table, Menu,
+  MenuPage, pseudo-states).
+
+## Known gaps (still open)
+
+- **Wayland backend** — `build/_deps/lvgl-src/src/drivers/wayland/` ships,
+  needs system `libwayland-client-dev` and a parallel `lv_wayland_window_create`
+  branch in `main.c`.
+- **Framework adapters (Solid/Preact)** — `framework.js` IS the renderer +
+  the (only) adapter; no `HostRenderer` interface extracted yet.
+- **Atom-interned `js_setProperty`** — currently a ~50-branch `strcmp` chain
+  per call. Not yet profiled as a bottleneck.
+- **DevTools / signal inspector** — none.
+- **Formatter / linter** — none (intentional? no project preference set).
 - **Still-unbound LVGL widgets** compiled into this build: `animimg`,
-  `canvas`, `imagebutton`, `keyboard`, `line`, `menu`, `table`, `tileview`,
-  `win`. Most need either image data (animimg/imagebutton), point-list
-  drawing (line/canvas), or page-management semantics (menu/win/tileview)
-  that the current declarative model doesn't yet express.
+  `canvas`, `imagebutton`, `keyboard` (the on-screen one), `imgbutton`,
+  `tileview`, `win`. Most need either image data, point-list drawing, or
+  page-management semantics that don't map cleanly to the declarative model.
 
 ## Hard rules from the design doc
 
@@ -186,4 +288,5 @@ is done, none has a stub:
 - No CSS parsing, no CSS selectors. Style objects only, handled in
   `js_setProperty`.
 - The tree is built once; reactivity drives property-only updates. Do not
-  introduce a virtual DOM diff or remount-on-change.
+  introduce a virtual DOM diff or remount-on-change. `<For>` / `<Show>` are
+  the *only* sanctioned dynamic mounting points.

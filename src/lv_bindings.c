@@ -204,6 +204,26 @@ static void btnmatrix_map_delete_cb(lv_event_t *e) {
     lv_obj_set_user_data(obj, NULL);
 }
 
+/* Line points storage — `lv_line_set_points` keeps the array pointer it is
+ * given (no copy), so we must own the buffer for the widget's lifetime and
+ * free it on LV_EVENT_DELETE. Same shape as btnmatrix_map_t above. */
+typedef struct {
+    lv_point_precise_t *points;
+    uint32_t            count;
+} sg_line_pts_t;
+
+static void sg_line_pts_free(sg_line_pts_t *p) {
+    if (!p) return;
+    lv_free(p->points);
+    lv_free(p);
+}
+
+static void sg_line_pts_delete_cb(lv_event_t *e) {
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    sg_line_pts_free((sg_line_pts_t *)lv_obj_get_user_data(obj));
+    lv_obj_set_user_data(obj, NULL);
+}
+
 /* ── event callback bridge ──────────────────────────────────────────────── */
 
 typedef struct {
@@ -424,6 +444,12 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
     }
     else if (strcmp(type, "Scale")    == 0) obj = lv_scale_create(parent);
     else if (strcmp(type, "Span")     == 0) obj = lv_spangroup_create(parent);
+    else if (strcmp(type, "Line")     == 0) {
+        obj = lv_line_create(parent);
+        lv_obj_add_event_cb(obj, sg_line_pts_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+    else if (strcmp(type, "Table")    == 0) obj = lv_table_create(parent);
+    else if (strcmp(type, "Menu")     == 0) obj = lv_menu_create(parent);
     else                                    { obj = lv_obj_create(parent); make_clean_container(obj); }
 
     /* Make interactive widgets reachable by the keyboard/encoder group */
@@ -438,7 +464,9 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
          strcmp(type, "Roller")       == 0 ||
          strcmp(type, "Spinbox")      == 0 ||
          strcmp(type, "ButtonMatrix") == 0 ||
-         strcmp(type, "Calendar")     == 0)) {
+         strcmp(type, "Calendar")     == 0 ||
+         strcmp(type, "Table")        == 0 ||
+         strcmp(type, "Menu")         == 0)) {
         lv_group_add_obj(g_group, obj);
     }
 
@@ -483,6 +511,23 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
     const char *key = JS_ToCString(ctx, argv[1]);
     if (!key) return JS_EXCEPTION;
 
+    /* Optional 4th argument is a pseudo-state string ("hover" | "focus" |
+     * "pressed" | "disabled"); without it, the selector is LV_STATE_DEFAULT
+     * (0) and styles apply to the widget's normal state. Used by JS like
+     *   lv.setProperty(node, "backgroundColor", "#222", "hover")
+     * to drive `style={{ hover: {backgroundColor: "#222"} }}`. */
+    lv_style_selector_t selector = 0;
+    if (argc >= 4 && JS_IsString(argv[3])) {
+        const char *s = JS_ToCString(ctx, argv[3]);
+        if (s) {
+            if      (strcmp(s, "hover")    == 0) selector = LV_STATE_HOVERED;
+            else if (strcmp(s, "focus")    == 0) selector = LV_STATE_FOCUSED;
+            else if (strcmp(s, "pressed")  == 0) selector = LV_STATE_PRESSED;
+            else if (strcmp(s, "disabled") == 0) selector = LV_STATE_DISABLED;
+            JS_FreeCString(ctx, s);
+        }
+    }
+
     /* ── layout / size ── */
     if (strcmp(key, "width") == 0) {
         lv_obj_set_width(obj, parse_size(ctx, argv[2]));
@@ -523,21 +568,21 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         }
         /* alignItems → cross axis, justifyContent → main axis (CSS naming) */
         if (strcmp(key, "alignItems") == 0)
-            lv_obj_set_style_flex_cross_place(obj, a, 0);
+            lv_obj_set_style_flex_cross_place(obj, a, selector);
         else
-            lv_obj_set_style_flex_main_place(obj, a, 0);
+            lv_obj_set_style_flex_main_place(obj, a, selector);
         JS_FreeCString(ctx, v);
     }
     /* ── flex gap (CSS `gap`): spacing between children, both axes ── */
     else if (strcmp(key, "gap") == 0) {
         int32_t v; JS_ToInt32(ctx, &v, argv[2]);
-        lv_obj_set_style_pad_row(obj, v, 0);
-        lv_obj_set_style_pad_column(obj, v, 0);
+        lv_obj_set_style_pad_row(obj, v, selector);
+        lv_obj_set_style_pad_column(obj, v, selector);
     }
     /* ── padding / margin ── */
     else if (strcmp(key, "padding") == 0) {
         int32_t v; JS_ToInt32(ctx, &v, argv[2]);
-        lv_obj_set_style_pad_all(obj, v, 0);
+        lv_obj_set_style_pad_all(obj, v, selector);
     } else if (strcmp(key, "margin") == 0) {
         /* LVGL uses padding on parent; approximate via translation */
         (void)0;
@@ -546,22 +591,22 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
     else if (strcmp(key, "backgroundColor") == 0) {
         const char *v = JS_ToCString(ctx, argv[2]);
         sg_color_t c = parse_color_ex(v);
-        lv_obj_set_style_bg_color(obj, c.color, 0);
-        lv_obj_set_style_bg_opa(obj, c.opa, 0);
+        lv_obj_set_style_bg_color(obj, c.color, selector);
+        lv_obj_set_style_bg_opa(obj, c.opa, selector);
         JS_FreeCString(ctx, v);
     }
     /* ── border / radius ── */
     else if (strcmp(key, "borderRadius") == 0) {
         int32_t v; JS_ToInt32(ctx, &v, argv[2]);
-        lv_obj_set_style_radius(obj, v, 0);
+        lv_obj_set_style_radius(obj, v, selector);
     } else if (strcmp(key, "borderWidth") == 0) {
         int32_t v; JS_ToInt32(ctx, &v, argv[2]);
-        lv_obj_set_style_border_width(obj, v, 0);
+        lv_obj_set_style_border_width(obj, v, selector);
     } else if (strcmp(key, "borderColor") == 0) {
         const char *v = JS_ToCString(ctx, argv[2]);
         sg_color_t c = parse_color_ex(v);
-        lv_obj_set_style_border_color(obj, c.color, 0);
-        lv_obj_set_style_border_opa(obj, c.opa, 0);
+        lv_obj_set_style_border_color(obj, c.color, selector);
+        lv_obj_set_style_border_opa(obj, c.opa, selector);
         JS_FreeCString(ctx, v);
     }
     /* ── text / label ── */
@@ -581,8 +626,8 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
     } else if (strcmp(key, "textColor") == 0) {
         const char *v = JS_ToCString(ctx, argv[2]);
         sg_color_t c = parse_color_ex(v);
-        lv_obj_set_style_text_color(obj, c.color, 0);
-        lv_obj_set_style_text_opa(obj, c.opa, 0);
+        lv_obj_set_style_text_color(obj, c.color, selector);
+        lv_obj_set_style_text_opa(obj, c.opa, selector);
         JS_FreeCString(ctx, v);
     } else if (strcmp(key, "fontSize") == 0) {
         int32_t v; JS_ToInt32(ctx, &v, argv[2]);
@@ -591,11 +636,11 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         if      (v >= 24) f = &lv_font_montserrat_24;
         else if (v >= 20) f = &lv_font_montserrat_20;
         else if (v >= 16) f = &lv_font_montserrat_16;
-        lv_obj_set_style_text_font(obj, f, 0);
+        lv_obj_set_style_text_font(obj, f, selector);
     } else if (strcmp(key, "font") == 0) {
         /* int handle returned by loadFont() */
         int64_t h; JS_ToInt64(ctx, &h, argv[2]);
-        if (h) lv_obj_set_style_text_font(obj, (const lv_font_t *)(uintptr_t)h, 0);
+        if (h) lv_obj_set_style_text_font(obj, (const lv_font_t *)(uintptr_t)h, selector);
     } else if (strcmp(key, "scrollable") == 0) {
         if (JS_ToBool(ctx, argv[2]))
             lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
@@ -885,6 +930,87 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         if (lv_obj_get_class(obj) == &lv_tabview_class && v >= 0)
             lv_tabview_set_active(obj, (uint32_t)v, LV_ANIM_OFF);
     }
+    /* ── Line: points = [[x, y], [x, y], ...] ── */
+    else if (strcmp(key, "points") == 0) {
+        if (lv_obj_get_class(obj) == &lv_line_class && JS_IsArray(ctx, argv[2])) {
+            uint32_t len = 0;
+            JSValue jlen = JS_GetPropertyStr(ctx, argv[2], "length");
+            JS_ToUint32(ctx, &len, jlen);
+            JS_FreeValue(ctx, jlen);
+
+            sg_line_pts_t *p = lv_malloc(sizeof(*p));
+            p->count  = len;
+            p->points = lv_malloc(sizeof(lv_point_precise_t) * (len > 0 ? len : 1));
+            for (uint32_t i = 0; i < len; i++) {
+                JSValue pt = JS_GetPropertyUint32(ctx, argv[2], i);
+                int32_t x = 0, y = 0;
+                if (JS_IsArray(ctx, pt)) {
+                    JSValue jx = JS_GetPropertyUint32(ctx, pt, 0);
+                    JSValue jy = JS_GetPropertyUint32(ctx, pt, 1);
+                    JS_ToInt32(ctx, &x, jx);
+                    JS_ToInt32(ctx, &y, jy);
+                    JS_FreeValue(ctx, jx);
+                    JS_FreeValue(ctx, jy);
+                }
+                p->points[i].x = x;
+                p->points[i].y = y;
+                JS_FreeValue(ctx, pt);
+            }
+            sg_line_pts_free((sg_line_pts_t *)lv_obj_get_user_data(obj));
+            lv_obj_set_user_data(obj, p);
+            lv_line_set_points(obj, p->points, p->count);
+        }
+    }
+    /* ── Table: rows, cols, cells (2D string array) ── */
+    else if (strcmp(key, "rows") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_table_class && v > 0)
+            lv_table_set_row_count(obj, (uint32_t)v);
+    } else if (strcmp(key, "cols") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_table_class && v > 0)
+            lv_table_set_column_count(obj, (uint32_t)v);
+    } else if (strcmp(key, "cells") == 0) {
+        if (lv_obj_get_class(obj) == &lv_table_class && JS_IsArray(ctx, argv[2])) {
+            uint32_t rows = 0;
+            JSValue jlen = JS_GetPropertyStr(ctx, argv[2], "length");
+            JS_ToUint32(ctx, &rows, jlen);
+            JS_FreeValue(ctx, jlen);
+
+            uint32_t cols = 0;
+            for (uint32_t r = 0; r < rows; r++) {
+                JSValue row = JS_GetPropertyUint32(ctx, argv[2], r);
+                if (JS_IsArray(ctx, row)) {
+                    uint32_t rc = 0;
+                    JSValue rlen = JS_GetPropertyStr(ctx, row, "length");
+                    JS_ToUint32(ctx, &rc, rlen);
+                    JS_FreeValue(ctx, rlen);
+                    if (rc > cols) cols = rc;
+                }
+                JS_FreeValue(ctx, row);
+            }
+            if (rows > 0) lv_table_set_row_count(obj, rows);
+            if (cols > 0) lv_table_set_column_count(obj, cols);
+
+            for (uint32_t r = 0; r < rows; r++) {
+                JSValue row = JS_GetPropertyUint32(ctx, argv[2], r);
+                if (JS_IsArray(ctx, row)) {
+                    uint32_t rc = 0;
+                    JSValue rlen = JS_GetPropertyStr(ctx, row, "length");
+                    JS_ToUint32(ctx, &rc, rlen);
+                    JS_FreeValue(ctx, rlen);
+                    for (uint32_t c = 0; c < rc; c++) {
+                        JSValue cell = JS_GetPropertyUint32(ctx, row, c);
+                        const char *s = JS_ToCString(ctx, cell);
+                        if (s) lv_table_set_cell_value(obj, r, c, s);
+                        JS_FreeCString(ctx, s);
+                        JS_FreeValue(ctx, cell);
+                    }
+                }
+                JS_FreeValue(ctx, row);
+            }
+        }
+    }
 
     JS_FreeCString(ctx, key);
     return JS_UNDEFINED;
@@ -1040,6 +1166,37 @@ static JSValue js_listAddButton(JSContext *ctx, JSValueConst this_val,
     return obj_to_js(ctx, btn);
 }
 
+/* menuAddPage(menu, title) → page node handle.
+ *
+ * The first page added is auto-activated (lv_menu_create leaves the menu
+ * blank otherwise). The "did we already auto-activate?" flag lives on the
+ * menu's user_data — any non-NULL value means we have set a page. */
+static JSValue js_menuAddPage(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    lv_obj_t   *menu  = js_to_obj(ctx, argv[0]);
+    const char *title = JS_ToCString(ctx, argv[1]);
+    lv_obj_t   *page  = lv_menu_page_create(menu, title ? (char *)title : NULL);
+    JS_FreeCString(ctx, title);
+    if (page && menu && lv_obj_get_user_data(menu) == NULL) {
+        lv_menu_set_page(menu, page);
+        lv_obj_set_user_data(menu, (void *)1);
+    }
+    return obj_to_js(ctx, page);
+}
+
+/* menuSetPage(menu, page) — switch the displayed page imperatively. */
+static JSValue js_menuSetPage(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    lv_obj_t *menu = js_to_obj(ctx, argv[0]);
+    lv_obj_t *page = js_to_obj(ctx, argv[1]);
+    lv_menu_set_page(menu, page);
+    return JS_UNDEFINED;
+}
+
 /* chartAddSeries(chart, colorString) → series handle (int).
  * Series are owned by the chart and freed when the chart is deleted. */
 static JSValue js_chartAddSeries(JSContext *ctx, JSValueConst this_val,
@@ -1192,6 +1349,164 @@ static JSValue js_showMsgbox(JSContext *ctx, JSValueConst this_val,
     return obj_to_js(ctx, mbox);
 }
 
+/* ── Animation API ──────────────────────────────────────────────────────── */
+
+typedef struct {
+    JSContext *ctx;
+    JSValue    on_complete;
+} sg_anim_cb_t;
+
+static void sg_anim_completed(lv_anim_t *anim) {
+    sg_anim_cb_t *cb = (sg_anim_cb_t *)lv_anim_get_user_data(anim);
+    if (!cb || JS_IsUndefined(cb->on_complete)) return;
+    JSValue ret = JS_Call(cb->ctx, cb->on_complete, JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(ret)) js_std_dump_error(cb->ctx);
+    JS_FreeValue(cb->ctx, ret);
+}
+
+static void sg_anim_deleted(lv_anim_t *anim) {
+    sg_anim_cb_t *cb = (sg_anim_cb_t *)lv_anim_get_user_data(anim);
+    if (!cb) return;
+    JS_FreeValue(cb->ctx, cb->on_complete);
+    lv_free(cb);
+}
+
+/* Property exec wrappers — `lv_obj_set_{x,y,width,height}` already match
+ * lv_anim_exec_xcb_t; the rest need a wrapper that either passes a selector
+ * (style props need one) or dispatches by widget class (the "value" anim). */
+
+static void anim_exec_opacity(void *var, int32_t v) {
+    if (v < 0) v = 0; else if (v > 255) v = 255;
+    lv_obj_set_style_opa((lv_obj_t *)var, (lv_opa_t)v, 0);
+}
+
+static void anim_exec_rotation(void *var, int32_t v) {
+    lv_obj_set_style_transform_rotation((lv_obj_t *)var, v, 0);
+}
+
+static void anim_exec_scale(void *var, int32_t v) {
+    lv_obj_set_style_transform_scale((lv_obj_t *)var, v, 0);
+}
+
+static void anim_exec_value(void *var, int32_t v) {
+    lv_obj_t *obj = (lv_obj_t *)var;
+    const lv_obj_class_t *cls = lv_obj_get_class(obj);
+    if      (cls == &lv_bar_class)      lv_bar_set_value(obj, v, LV_ANIM_OFF);
+    else if (cls == &lv_slider_class)   lv_slider_set_value(obj, v, LV_ANIM_OFF);
+    else if (cls == &lv_arc_class)      lv_arc_set_value(obj, v);
+    else if (cls == &lv_dropdown_class) lv_dropdown_set_selected(obj, (uint32_t)v);
+    else if (cls == &lv_roller_class)   lv_roller_set_selected(obj, (uint32_t)v, LV_ANIM_OFF);
+    else if (cls == &lv_spinbox_class)  lv_spinbox_set_value(obj, v);
+}
+
+/* createAnimation(node, opts) — opts = {
+ *   property:   "x" | "y" | "width" | "height" | "opacity" | "rotation"
+ *               | "scale" | "value"                  (required)
+ *   from, to:   int                                  (required)
+ *   duration:   ms                                   (default 200)
+ *   easing:     "linear" | "ease-in" | "ease-out" | "ease-in-out"
+ *               | "overshoot" | "bounce" | "step"    (default "linear")
+ *   delay:      ms                                   (default 0)
+ *   repeat:     int | "infinite"                     (default 1)
+ *   onComplete: function()                           (optional)
+ * }
+ */
+static JSValue js_createAnimation(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2 || !JS_IsObject(argv[1])) return JS_EXCEPTION;
+
+    lv_obj_t *obj = js_to_obj(ctx, argv[0]);
+
+    JSValue jprop = JS_GetPropertyStr(ctx, argv[1], "property");
+    JSValue jfrom = JS_GetPropertyStr(ctx, argv[1], "from");
+    JSValue jto   = JS_GetPropertyStr(ctx, argv[1], "to");
+    JSValue jdur  = JS_GetPropertyStr(ctx, argv[1], "duration");
+    JSValue jease = JS_GetPropertyStr(ctx, argv[1], "easing");
+    JSValue jrep  = JS_GetPropertyStr(ctx, argv[1], "repeat");
+    JSValue jdel  = JS_GetPropertyStr(ctx, argv[1], "delay");
+    JSValue jcb   = JS_GetPropertyStr(ctx, argv[1], "onComplete");
+
+    const char *prop = JS_ToCString(ctx, jprop);
+    const char *ease = JS_ToCString(ctx, jease);
+    int32_t  from = 0, to = 0, duration = 200, delay = 0;
+    uint32_t repeat = 1;
+
+    if (JS_IsNumber(jfrom)) JS_ToInt32(ctx, &from, jfrom);
+    if (JS_IsNumber(jto))   JS_ToInt32(ctx, &to,   jto);
+    if (JS_IsNumber(jdur))  JS_ToInt32(ctx, &duration, jdur);
+    if (JS_IsNumber(jdel))  JS_ToInt32(ctx, &delay, jdel);
+    if (JS_IsNumber(jrep)) {
+        int32_t r; JS_ToInt32(ctx, &r, jrep);
+        if (r > 0) repeat = (uint32_t)r;
+    } else if (JS_IsString(jrep)) {
+        const char *s = JS_ToCString(ctx, jrep);
+        if (s && strcmp(s, "infinite") == 0) repeat = LV_ANIM_REPEAT_INFINITE;
+        JS_FreeCString(ctx, s);
+    }
+
+    lv_anim_exec_xcb_t exec_cb = NULL;
+    if (prop) {
+        if      (strcmp(prop, "x")        == 0) exec_cb = (lv_anim_exec_xcb_t)lv_obj_set_x;
+        else if (strcmp(prop, "y")        == 0) exec_cb = (lv_anim_exec_xcb_t)lv_obj_set_y;
+        else if (strcmp(prop, "width")    == 0) exec_cb = (lv_anim_exec_xcb_t)lv_obj_set_width;
+        else if (strcmp(prop, "height")   == 0) exec_cb = (lv_anim_exec_xcb_t)lv_obj_set_height;
+        else if (strcmp(prop, "opacity")  == 0) exec_cb = anim_exec_opacity;
+        else if (strcmp(prop, "rotation") == 0) exec_cb = anim_exec_rotation;
+        else if (strcmp(prop, "scale")    == 0) exec_cb = anim_exec_scale;
+        else if (strcmp(prop, "value")    == 0) exec_cb = anim_exec_value;
+    }
+
+    lv_anim_path_cb_t path_cb = lv_anim_path_linear;
+    if (ease) {
+        if      (strcmp(ease, "ease-in")     == 0) path_cb = lv_anim_path_ease_in;
+        else if (strcmp(ease, "ease-out")    == 0) path_cb = lv_anim_path_ease_out;
+        else if (strcmp(ease, "ease-in-out") == 0) path_cb = lv_anim_path_ease_in_out;
+        else if (strcmp(ease, "overshoot")   == 0) path_cb = lv_anim_path_overshoot;
+        else if (strcmp(ease, "bounce")      == 0) path_cb = lv_anim_path_bounce;
+        else if (strcmp(ease, "step")        == 0) path_cb = lv_anim_path_step;
+    }
+
+    JSValue result = JS_UNDEFINED;
+    if (exec_cb == NULL) {
+        result = JS_ThrowTypeError(ctx,
+            "createAnimation: unknown property '%s' "
+            "(use x/y/width/height/opacity/rotation/scale/value)",
+            prop ? prop : "(null)");
+    } else {
+        sg_anim_cb_t *cb = lv_malloc(sizeof(*cb));
+        cb->ctx         = ctx;
+        cb->on_complete = JS_IsFunction(ctx, jcb) ? JS_DupValue(ctx, jcb) : JS_UNDEFINED;
+
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, obj);
+        lv_anim_set_values(&a, from, to);
+        lv_anim_set_duration(&a, (uint32_t)duration);
+        lv_anim_set_exec_cb(&a, exec_cb);
+        lv_anim_set_path_cb(&a, path_cb);
+        lv_anim_set_user_data(&a, cb);
+        lv_anim_set_completed_cb(&a, sg_anim_completed);
+        lv_anim_set_deleted_cb(&a, sg_anim_deleted);
+        if (delay > 0)   lv_anim_set_delay(&a, (uint32_t)delay);
+        if (repeat != 1) lv_anim_set_repeat_count(&a, repeat);
+        lv_anim_start(&a);
+    }
+
+    JS_FreeCString(ctx, prop);
+    JS_FreeCString(ctx, ease);
+    JS_FreeValue(ctx, jprop);
+    JS_FreeValue(ctx, jfrom);
+    JS_FreeValue(ctx, jto);
+    JS_FreeValue(ctx, jdur);
+    JS_FreeValue(ctx, jease);
+    JS_FreeValue(ctx, jrep);
+    JS_FreeValue(ctx, jdel);
+    JS_FreeValue(ctx, jcb);
+
+    return result;
+}
+
 /* ── module export list ─────────────────────────────────────────────────── */
 
 static const JSCFunctionListEntry lv_funcs[] = {
@@ -1207,9 +1522,12 @@ static const JSCFunctionListEntry lv_funcs[] = {
     JS_CFUNC_DEF("setDefaultFont", 1, js_setDefaultFont),
     JS_CFUNC_DEF("addTab",         2, js_addTab),
     JS_CFUNC_DEF("listAddButton",  2, js_listAddButton),
+    JS_CFUNC_DEF("menuAddPage",    2, js_menuAddPage),
+    JS_CFUNC_DEF("menuSetPage",    2, js_menuSetPage),
     JS_CFUNC_DEF("chartAddSeries", 2, js_chartAddSeries),
     JS_CFUNC_DEF("chartSetData",   3, js_chartSetData),
     JS_CFUNC_DEF("showMsgbox",     2, js_showMsgbox),
+    JS_CFUNC_DEF("createAnimation",2, js_createAnimation),
 };
 
 static int lv_module_init(JSContext *ctx, JSModuleDef *m) {
