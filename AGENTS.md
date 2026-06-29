@@ -108,6 +108,30 @@ Widgets are never destroyed and recreated by the static path.
   be a function**. Static VNode children mount/unmount the widget but the
   component body only runs once at the initial JSX evaluation.
 
+## Theme API (Element Plus, Vue default style)
+
+The active theme is **Element Plus light** by default (primary `#409EFF`,
+4 px radius, flat buttons). Runtime switching:
+
+```js
+import { setTheme, setThemeToken } from "./js/framework.js";
+setTheme("dark");                        // full dark palette
+setThemeToken("primary", "#e74c3c");     // patch one token
+```
+
+`setTheme` / `setThemeToken` both call `lv_obj_report_style_change(NULL)` to
+repaint every widget. On a typical screen (~100 widgets) this takes ~1 ms.
+**Don't call it per frame** — it's for theme toggle, not animation.
+
+Token names (matching `sg_theme_tokens_t` field names):
+`primary`, `primary_dark`, `on_primary`, `secondary`,
+`bg`, `surface`, `on_surface`, `on_variant`, `outline`, `track`,
+`danger`, `warning`.
+
+The mutable working copy is `g_tokens` in `sg_theme.c`; `sg_tokens_light`
+and `sg_tokens_dark` are read-only presets. `sg_theme_set_scheme` copies a
+preset into `g_tokens`; `sg_theme_set_token` patches one field directly.
+
 ## Pseudo-state styles
 
 ```jsx
@@ -138,11 +162,19 @@ The 4 pseudo-state strings are mirrored across two places:
   fall back to the matching Montserrat for `LV_SYMBOL_*` glyphs (checkbox
   tick, dropdown arrow); without that fallback you'd see tofu for symbols.
 - `setDefaultFont(handle)` reapplies `sg_theme` with that font, so every
-  widget inherits it unless it overrides `font`. Call once at startup.
+  widget inherits it unless it overrides `font`. Call it once at startup.
+- **`setDefaultFont()` with no args** auto-discovers the first installed CJK
+  font via `lv.findCjkFontPath()` and loads it at 18 px. Probe order:
+  wqy-microhei → NotoSansCJK (opentype) → NotoSansCJK (truetype) →
+  PingFang → MS YaHei.
+- **`loadFontSizes(path, [14, 18, 24])`** loads multiple sizes in one call,
+  returns `{14: handle, 18: handle, 24: handle}`.
+- **`findCjkFont()`** re-exports `lv.findCjkFontPath()` — returns the path
+  string or null.
 - The font-file buffer passed to Tiny-TTF is **intentionally never freed**
   (the font references it for its lifetime). Don't add a free.
 
-## Images (`<image src>`)
+## Images (`<image>`, `<animimg>`, `<imagebutton>`)
 
 `lv_conf.h` enables LVGL's bundled decoders — **zero system dependencies**:
 
@@ -154,6 +186,53 @@ The 4 pseudo-state strings are mirrored across two places:
 GIF is *not* an image decoder in LVGL — it's a separate animation widget
 (`lv_gif_create`), currently unbound.
 
+### Two ways to refer to an image
+
+| API | Returns | Where it lives | When to use |
+|---|---|---|---|
+| `"A:/abs/path.png"` | string | JS heap, freed by JS_FreeCString after `lv_image_set_src` internally `lv_strdup`s | one-off, no `loadImage` indirection |
+| `loadImage("/abs/path.png")` | opaque int handle | `sg_image_handle_t` in `lv_malloc`, **never freed** (image catalog) | preferred — reusable, fails fast on missing file, future-proof |
+
+`loadImage` probes the file with `fopen`, normalizes the prefix (auto-prepends
+`A:` if the path is `/`-absolute), returns `0` on failure. `loadImages([…])`
+is the batch helper. The handle is the heap struct pointer cast to `int64_t`
+— same trick as `loadFont`.
+
+`<image src>` accepts **both forms**, dispatched in `js_setProperty`'s `src`
+branch via the `resolve_image_src` helper.
+
+### `<animimg src={…} duration repeat start>`
+
+| Prop | Type | LVGL call |
+|---|---|---|
+| `src` | `(string \| handle)[]` | `lv_animimg_set_src` |
+| `duration` | number (ms) | `lv_animimg_set_duration` |
+| `repeat` | number \| `"infinite"` | `lv_animimg_set_repeat_count` (string maps to `LV_ANIM_REPEAT_INFINITE = 0xFFFFFFFF`) |
+| `start` | boolean | `lv_animimg_start` when truthy |
+
+**Ownership**: `lv_animimg_set_src` stores the array pointer AS-IS
+(`animimg->dsc = dsc;`); each frame swap calls `lv_image_set_src` which
+copies the inner string. We own the array + always strdup the individual
+paths into `sg_animimg_ctx_t`; both freed in `sg_animimg_delete_cb`.
+Always strdup (handles and plain strings alike) — predictability beats
+per-frame ownership branching, and per-frame paths are tiny.
+
+### `<imagebutton released pressed disabled checkedReleased checkedPressed checkedDisabled checkable>`
+
+Each state prop accepts a string OR handle. The helper
+`imagebutton_set_state` strdups into `sg_imagebutton_ctx.srcs[STATE]`,
+replace-and-frees on reassignment, frees all 6 slots in
+`sg_imagebutton_delete_cb`.
+
+Internally always calls `lv_imagebutton_set_src(btn, STATE, src, NULL, NULL)`
+— stonegui binds the simple solid case, NOT the 9-patch 3-tile variant
+(would require additional `*_mid` / `*_right` props).
+
+`checkable={true}` adds `LV_OBJ_FLAG_CHECKABLE` so clicks toggle between
+released and checked-released states. The 6 imagebutton states map to
+`LV_IMAGEBUTTON_STATE_RELEASED`/`_PRESSED`/`_DISABLED` and their
+`_CHECKED_*` siblings (see `lv_imagebutton.h`).
+
 ## CJK input plumbing (fragile)
 
 `main.c` replaces LVGL's SDL keyboard read callback with `sg_keyboard_read`
@@ -163,6 +242,16 @@ driver (`char buf[KEYBOARD_BUFFER_SIZE]; bool dummy_read;`). **If you bump
 the LVGL pin in `CMakeLists.txt`, re-verify this layout** in
 `build/_deps/lvgl-src/src/drivers/sdl/`. IME candidate-window placement uses
 `SDL_SetTextInputRect` from `sg_update_ime_rect` in `lv_bindings.c`.
+
+## Keyboard shortcuts (Ctrl+A/C/V/X, Home, End)
+
+Ctrl-combo shortcuts for `<input>` fields are intercepted in
+`sdl_event_watch` in [`src/main.c`](src/main.c) (NOT in `sg_keyboard_read`).
+`sdl_event_watch` fires for every SDL event; Ctrl+key combos arrive as
+`SDL_KEYDOWN` events (not `SDL_TEXTINPUT`), so `sg_keyboard_read` would never
+see them. The focused textarea is retrieved via
+`lv_group_get_focused_obj(g_kbd_group)` where `g_kbd_group` is set from
+`main()` after `lv_bindings_set_group(group)`.
 
 ## Colours, sizes, layout — small but easy-to-miss specifics
 
@@ -223,7 +312,7 @@ usage is from a `ref={node => ...}` callback on the `<chart>` element.
 
 ## Owned-pointer lifetimes (LVGL keeps the pointer)
 
-Three widgets receive arrays from JS that LVGL stores **by reference** (no
+Five widgets receive data from JS that LVGL stores **by reference** (no
 copy). Each allocates a heap struct, attaches it via `lv_obj_set_user_data`,
 and frees on `LV_EVENT_DELETE`. **Do not "simplify" the strdup/delete
 pattern** — the widget would dereference freed memory on next paint.
@@ -232,6 +321,12 @@ pattern** — the widget would dereference freed memory on next paint.
   "clean up" that sentinel).
 - Line `points` → `sg_line_pts_t` (parallel structure).
 - Msgbox callbacks → `msgbox_ctx_t` (holds JSValue refs).
+- AnimImg `src` array → `sg_animimg_ctx_t` (`const char **paths` + count;
+  array stored as-is by `lv_animimg_set_src`, individual paths copied by the
+  inner image on each frame swap, but the array itself must survive).
+- ImageButton state srcs → `sg_imagebutton_ctx_t.srcs[STATE]` (one strdup'd
+  string per `LV_IMAGEBUTTON_STATE_*` slot; replace-and-free on
+  reassignment; all 6 freed on delete).
 
 ## Animation API
 
@@ -276,10 +371,21 @@ cancellation.
   per call. Not yet profiled as a bottleneck.
 - **DevTools / signal inspector** — none.
 - **Formatter / linter** — none (intentional? no project preference set).
-- **Still-unbound LVGL widgets** compiled into this build: `animimg`,
-  `canvas`, `imagebutton`, `keyboard` (the on-screen one), `imgbutton`,
-  `tileview`, `win`. Most need either image data, point-list drawing, or
-  page-management semantics that don't map cleanly to the declarative model.
+- **Still-unbound LVGL widgets** compiled into this build: `canvas`,
+  `tileview`, `win`. Each needs an imperative shape that doesn't map
+  cleanly to the declarative model (pixel buffer / page-management /
+  window decoration).
+
+## `js_createNode` hardcoded defaults
+
+| Widget | Default | Prop override | Notes |
+|---|---|---|---|
+| `Spinner` | arc angle 270°, spin period 10 s | `arcAngle={N}` overrides angle; `spinTime={ms}` overrides period | Changed from 360° to 270° (Element Plus style) |
+| `Spinbox` | 5 digits, range ±99999, step 1 | `digits="N.M"`, `min`, `max`, `step` | All overridable via props |
+| `Tabview` | 44 px tab bar | `tabBarSize={N}` | Overridable via prop |
+| `Calendar` | arrow-header always created | `arrowHeader={false}` opts out | Pass via the `<calendar>` JSX prop |
+| `LED` | full brightness (255) | `brightness={N}` | Overridable |
+| `Dropdown` | empty options | `options="a\nb\nc"` | Set on mount or reactively |
 
 ## Hard rules from the design doc
 

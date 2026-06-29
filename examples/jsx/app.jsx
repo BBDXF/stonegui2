@@ -20,21 +20,9 @@ import * as lv from "lvgl";
 
 /* ── Fonts ───────────────────────────────────────────────────────────────── */
 
-const FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/System/Library/Fonts/PingFang.ttc",
-];
-const loadCjk = (size) => {
-    for (const p of FONT_CANDIDATES) {
-        const f = loadFont(p, size);
-        if (f) return f;
-    }
-    return 0;
-};
-const fontTitle = loadCjk(28);
-setDefaultFont(loadCjk(18));
+setDefaultFont();
+const _cjkPath = lv.findCjkFontPath();
+const fontTitle = _cjkPath ? loadFont(_cjkPath, 28) : 0;
 
 /* ── Shared components ───────────────────────────────────────────────────── */
 

@@ -78,6 +78,30 @@ static JSValue obj_to_js(JSContext *ctx, lv_obj_t *obj) {
     return JS_NewInt64(ctx, (int64_t)(uintptr_t)obj);
 }
 
+typedef struct sg_image_handle {
+    char *path;   /* owned, e.g. "A:/abs/path.png". Never freed (catalog pattern). */
+} sg_image_handle_t;
+
+/* Resolve a JS argument (string OR int handle) into a path.
+ * If *is_cstr is set to 1, caller MUST JS_FreeCString(ctx, returned).
+ * If *is_cstr is set to 0, returned pointer is owned by a handle — DO NOT free.
+ * Returns NULL on invalid input. */
+static const char *resolve_image_src(JSContext *ctx, JSValueConst v, int *is_cstr) {
+    *is_cstr = 0;
+    if (JS_IsString(v)) {
+        *is_cstr = 1;
+        return JS_ToCString(ctx, v);
+    }
+    if (JS_IsNumber(v)) {
+        int64_t h = 0;
+        if (JS_ToInt64(ctx, &h, v) == 0 && h) {
+            sg_image_handle_t *hdl = (sg_image_handle_t *)(uintptr_t)h;
+            return hdl->path;
+        }
+    }
+    return NULL;
+}
+
 /* colour string → { lv_color_t, lv_opa_t }
  *   "#rrggbb"       — opaque
  *   "#rrggbbaa"     — with alpha (00=transparent, ff=opaque)
@@ -222,6 +246,58 @@ static void sg_line_pts_delete_cb(lv_event_t *e) {
     lv_obj_t *obj = lv_event_get_target_obj(e);
     sg_line_pts_free((sg_line_pts_t *)lv_obj_get_user_data(obj));
     lv_obj_set_user_data(obj, NULL);
+}
+
+typedef struct sg_animimg_ctx {
+    const char **paths;   /* owned: array + each entry strdup'd */
+    int count;
+} sg_animimg_ctx_t;
+
+static void sg_animimg_delete_cb(lv_event_t *e) {
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    sg_animimg_ctx_t *ctx = lv_obj_get_user_data(obj);
+    if (ctx) {
+        for (int i = 0; i < ctx->count; i++)
+            if (ctx->paths[i]) lv_free((void *)ctx->paths[i]);
+        lv_free(ctx->paths);
+        lv_free(ctx);
+    }
+}
+
+typedef struct sg_imagebutton_ctx {
+    char *srcs[LV_IMAGEBUTTON_STATE_NUM];   /* owned strdup per state (NULL if unset) */
+} sg_imagebutton_ctx_t;
+
+static void sg_imagebutton_delete_cb(lv_event_t *e) {
+    lv_obj_t *obj = lv_event_get_target_obj(e);
+    sg_imagebutton_ctx_t *ctx = lv_obj_get_user_data(obj);
+    if (ctx) {
+        for (int i = 0; i < LV_IMAGEBUTTON_STATE_NUM; i++)
+            if (ctx->srcs[i]) lv_free(ctx->srcs[i]);
+        lv_free(ctx);
+    }
+}
+
+/* Set/replace one state's src on an imagebutton, taking ownership via strdup. */
+static void imagebutton_set_state(JSContext *ctx_js, lv_obj_t *obj,
+                                   lv_imagebutton_state_t state,
+                                   JSValueConst val) {
+    sg_imagebutton_ctx_t *ictx = lv_obj_get_user_data(obj);
+    if (!ictx) {
+        ictx = lv_malloc(sizeof(sg_imagebutton_ctx_t));
+        memset(ictx, 0, sizeof(sg_imagebutton_ctx_t));
+        lv_obj_set_user_data(obj, ictx);
+    }
+    int is_cstr = 0;
+    const char *p = resolve_image_src(ctx_js, val, &is_cstr);
+    if (!p) return;
+
+    char *owned = lv_strdup(p);
+    if (is_cstr) JS_FreeCString(ctx_js, p);
+
+    if (ictx->srcs[state]) lv_free(ictx->srcs[state]);
+    ictx->srcs[state] = owned;
+    lv_imagebutton_set_src(obj, state, owned, NULL, NULL);
 }
 
 /* ── event callback bridge ──────────────────────────────────────────────── */
@@ -385,6 +461,14 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
         lv_obj_center(lbl);
     }
     else if (strcmp(type, "Image")    == 0) obj = lv_image_create(parent);
+    else if (strcmp(type, "AnimImg")  == 0) {
+        obj = lv_animimg_create(parent);
+        lv_obj_add_event_cb(obj, sg_animimg_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+    else if (strcmp(type, "ImageButton") == 0) {
+        obj = lv_imagebutton_create(parent);
+        lv_obj_add_event_cb(obj, sg_imagebutton_delete_cb, LV_EVENT_DELETE, NULL);
+    }
     else if (strcmp(type, "Input")    == 0) {
         obj = lv_textarea_create(parent);
         /* Keep the IME candidate window anchored to this field */
@@ -397,7 +481,13 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
     else if (strcmp(type, "Arc")      == 0) obj = lv_arc_create(parent);
     else if (strcmp(type, "Spinner")  == 0) {
         obj = lv_spinner_create(parent);
-        lv_spinner_set_anim_params(obj, 10000, SG_SPINNER_ARC_ANGLE);
+        int32_t arc_angle = SG_SPINNER_ARC_ANGLE;
+        if (argc >= 2 && JS_IsObject(argv[1])) {
+            JSValue jaa = JS_GetPropertyStr(ctx, argv[1], "arcAngle");
+            if (JS_IsNumber(jaa)) JS_ToInt32(ctx, &arc_angle, jaa);
+            JS_FreeValue(ctx, jaa);
+        }
+        lv_spinner_set_anim_params(obj, 10000, (uint32_t)arc_angle);
     }
     else if (strcmp(type, "Checkbox") == 0) {
         obj = lv_checkbox_create(parent);
@@ -439,8 +529,16 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
     }
     else if (strcmp(type, "Calendar") == 0) {
         obj = lv_calendar_create(parent);
-        /* Built-in month-nav arrow header — most apps want it. */
-        lv_calendar_header_arrow_create(obj);
+        /* Built-in month-nav arrow header — most apps want it.
+         * Pass `arrowHeader: false` from JS to opt out. */
+        bool arrow = true;
+        if (argc >= 2 && JS_IsObject(argv[1])) {
+            JSValue jah = JS_GetPropertyStr(ctx, argv[1], "arrowHeader");
+            if (!JS_IsUndefined(jah))
+                arrow = JS_ToBool(ctx, jah);
+            JS_FreeValue(ctx, jah);
+        }
+        if (arrow) lv_calendar_header_arrow_create(obj);
     }
     else if (strcmp(type, "Scale")    == 0) obj = lv_scale_create(parent);
     else if (strcmp(type, "Span")     == 0) obj = lv_spangroup_create(parent);
@@ -450,6 +548,7 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
     }
     else if (strcmp(type, "Table")    == 0) obj = lv_table_create(parent);
     else if (strcmp(type, "Menu")     == 0) obj = lv_menu_create(parent);
+    else if (strcmp(type, "Keyboard") == 0) obj = lv_keyboard_create(parent);
     else                                    { obj = lv_obj_create(parent); make_clean_container(obj); }
 
     /* Make interactive widgets reachable by the keyboard/encoder group */
@@ -466,7 +565,8 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
          strcmp(type, "ButtonMatrix") == 0 ||
          strcmp(type, "Calendar")     == 0 ||
          strcmp(type, "Table")        == 0 ||
-         strcmp(type, "Menu")         == 0)) {
+         strcmp(type, "Menu")         == 0 ||
+         strcmp(type, "ImageButton")  == 0)) {
         lv_group_add_obj(g_group, obj);
     }
 
@@ -647,13 +747,49 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         else
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     }
-    /* ── Image ── */
+    /* ── Image / AnimImg src ── */
     else if (strcmp(key, "src") == 0) {
-        const char *v = JS_ToCString(ctx, argv[2]);
         const lv_obj_class_t *cls = lv_obj_get_class(obj);
-        if (cls == &lv_image_class && v)
-            lv_image_set_src(obj, v);
-        JS_FreeCString(ctx, v);
+        if (cls == &lv_image_class) {
+            int is_cstr = 0;
+            const char *p = resolve_image_src(ctx, argv[2], &is_cstr);
+            if (p) lv_image_set_src(obj, p);
+            if (is_cstr) JS_FreeCString(ctx, p);
+        } else if (cls == &lv_animimg_class) {
+            /* Array of (string|handle). LVGL stores the array pointer as-is
+             * (lv_animimg_set_src does NOT copy the array). It WILL copy each
+             * individual path via lv_image_set_src per frame. We own the
+             * array and the inner strdup'd strings; free both in DELETE cb. */
+            if (JS_IsArray(ctx, argv[2])) {
+                JSValue jlen = JS_GetPropertyStr(ctx, argv[2], "length");
+                uint32_t len = 0;
+                JS_ToUint32(ctx, &len, jlen);
+                JS_FreeValue(ctx, jlen);
+
+                /* Free previous owned src if any */
+                sg_animimg_ctx_t *old = lv_obj_get_user_data(obj);
+                if (old) {
+                    for (uint32_t i = 0; i < (uint32_t)old->count; i++)
+                        if (old->paths[i]) lv_free((void *)old->paths[i]);
+                    lv_free(old->paths);
+                    lv_free(old);
+                }
+
+                sg_animimg_ctx_t *nctx = lv_malloc(sizeof(sg_animimg_ctx_t));
+                nctx->count = (int)len;
+                nctx->paths = lv_malloc(len * sizeof(const char *));
+                for (uint32_t i = 0; i < len; i++) {
+                    JSValue item = JS_GetPropertyUint32(ctx, argv[2], i);
+                    int is_cstr = 0;
+                    const char *p = resolve_image_src(ctx, item, &is_cstr);
+                    nctx->paths[i] = p ? lv_strdup(p) : lv_strdup("");
+                    if (is_cstr && p) JS_FreeCString(ctx, p);
+                    JS_FreeValue(ctx, item);
+                }
+                lv_obj_set_user_data(obj, nctx);
+                lv_animimg_set_src(obj, (const void **)nctx->paths, nctx->count);
+            }
+        }
     }
     /* ── Progress / bar / slider / arc / dropdown / roller ── */
     else if (strcmp(key, "value") == 0) {
@@ -713,6 +849,40 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
     else if (strcmp(key, "oneLine") == 0) {
         if (lv_obj_get_class(obj) == &lv_textarea_class)
             lv_textarea_set_one_line(obj, JS_ToBool(ctx, argv[2]));
+    }
+    else if (strcmp(key, "maxLength") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_textarea_class)
+            lv_textarea_set_max_length(obj, (uint32_t)v);
+    }
+    else if (strcmp(key, "acceptedChars") == 0) {
+        const char *s = JS_ToCString(ctx, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_textarea_class)
+            lv_textarea_set_accepted_chars(obj, s);
+        JS_FreeCString(ctx, s);
+    }
+    else if (strcmp(key, "password") == 0) {
+        if (lv_obj_get_class(obj) == &lv_textarea_class)
+            lv_textarea_set_password_mode(obj, JS_ToBool(ctx, argv[2]));
+    }
+    else if (strcmp(key, "align") == 0) {
+        const char *s = JS_ToCString(ctx, argv[2]);
+        if (s && lv_obj_get_class(obj) == &lv_textarea_class) {
+            lv_text_align_t a = LV_TEXT_ALIGN_LEFT;
+            if      (strcmp(s, "center") == 0) a = LV_TEXT_ALIGN_CENTER;
+            else if (strcmp(s, "right")  == 0) a = LV_TEXT_ALIGN_RIGHT;
+            lv_textarea_set_align(obj, a);
+        }
+        JS_FreeCString(ctx, s);
+    }
+    else if (strcmp(key, "textSelection") == 0) {
+        if (lv_obj_get_class(obj) == &lv_textarea_class)
+            lv_textarea_set_text_selection(obj, JS_ToBool(ctx, argv[2]));
+    }
+    else if (strcmp(key, "cursorPos") == 0) {
+        int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+        if (lv_obj_get_class(obj) == &lv_textarea_class)
+            lv_textarea_set_cursor_pos(obj, (int32_t)v);
     }
     /* ── Spinner: spinTime (ms per revolution). Arc length is a fixed
      * default; lv_spinner_set_anim_params() takes both at once. */
@@ -1011,6 +1181,86 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
             }
         }
     }
+    /* ── Keyboard (on-screen) ── */
+    else if (strcmp(key, "target") == 0) {
+        if (lv_obj_get_class(obj) == &lv_keyboard_class) {
+            lv_obj_t *ta = js_to_obj(ctx, argv[2]);
+            lv_keyboard_set_textarea(obj, ta);
+        }
+    } else if (strcmp(key, "mode") == 0) {
+        if (lv_obj_get_class(obj) == &lv_keyboard_class) {
+            const char *v = JS_ToCString(ctx, argv[2]);
+            if (v) {
+                lv_keyboard_mode_t m = LV_KEYBOARD_MODE_TEXT_LOWER;
+                if      (strcmp(v, "text-upper") == 0) m = LV_KEYBOARD_MODE_TEXT_UPPER;
+                else if (strcmp(v, "number")     == 0) m = LV_KEYBOARD_MODE_NUMBER;
+                else if (strcmp(v, "special")    == 0) m = LV_KEYBOARD_MODE_SPECIAL;
+                lv_keyboard_set_mode(obj, m);
+                JS_FreeCString(ctx, v);
+            }
+        }
+    }
+    /* ── AnimImg props (other than `src`) ── */
+    else if (strcmp(key, "duration") == 0) {
+        const lv_obj_class_t *cls = lv_obj_get_class(obj);
+        if (cls == &lv_animimg_class) {
+            int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+            lv_animimg_set_duration(obj, (uint32_t)v);
+        }
+    }
+    else if (strcmp(key, "repeat") == 0) {
+        const lv_obj_class_t *cls = lv_obj_get_class(obj);
+        if (cls == &lv_animimg_class) {
+            if (JS_IsString(argv[2])) {
+                const char *s = JS_ToCString(ctx, argv[2]);
+                if (s && strcmp(s, "infinite") == 0)
+                    lv_animimg_set_repeat_count(obj, LV_ANIM_REPEAT_INFINITE);
+                JS_FreeCString(ctx, s);
+            } else {
+                int32_t v; JS_ToInt32(ctx, &v, argv[2]);
+                lv_animimg_set_repeat_count(obj, (uint32_t)v);
+            }
+        }
+    }
+    else if (strcmp(key, "start") == 0) {
+        const lv_obj_class_t *cls = lv_obj_get_class(obj);
+        if (cls == &lv_animimg_class && JS_ToBool(ctx, argv[2]))
+            lv_animimg_start(obj);
+    }
+
+    /* ── ImageButton state srcs ── */
+    else if (strcmp(key, "released") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class)
+            imagebutton_set_state(ctx, obj, LV_IMAGEBUTTON_STATE_RELEASED, argv[2]);
+    }
+    else if (strcmp(key, "pressed") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class)
+            imagebutton_set_state(ctx, obj, LV_IMAGEBUTTON_STATE_PRESSED, argv[2]);
+    }
+    else if (strcmp(key, "disabled") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class)
+            imagebutton_set_state(ctx, obj, LV_IMAGEBUTTON_STATE_DISABLED, argv[2]);
+    }
+    else if (strcmp(key, "checkedReleased") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class)
+            imagebutton_set_state(ctx, obj, LV_IMAGEBUTTON_STATE_CHECKED_RELEASED, argv[2]);
+    }
+    else if (strcmp(key, "checkedPressed") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class)
+            imagebutton_set_state(ctx, obj, LV_IMAGEBUTTON_STATE_CHECKED_PRESSED, argv[2]);
+    }
+    else if (strcmp(key, "checkedDisabled") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class)
+            imagebutton_set_state(ctx, obj, LV_IMAGEBUTTON_STATE_CHECKED_DISABLED, argv[2]);
+    }
+    else if (strcmp(key, "checkable") == 0) {
+        if (lv_obj_get_class(obj) == &lv_imagebutton_class) {
+            if (JS_ToBool(ctx, argv[2]))
+                lv_obj_add_flag(obj, LV_OBJ_FLAG_CHECKABLE);
+            else
+                lv_obj_remove_flag(obj, LV_OBJ_FLAG_CHECKABLE);
+        }
+    }
 
     JS_FreeCString(ctx, key);
     return JS_UNDEFINED;
@@ -1040,6 +1290,12 @@ static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
             out = JS_NewString(ctx, lv_textarea_get_text(obj));
         else if (cls == &lv_label_class)
             out = JS_NewString(ctx, lv_label_get_text(obj));
+        else
+            out = JS_UNDEFINED;
+    } else if (strcmp(key, "cursorPos") == 0) {
+        const lv_obj_class_t *cls = lv_obj_get_class(obj);
+        if (cls == &lv_textarea_class)
+            out = JS_NewUint32(ctx, lv_textarea_get_cursor_pos(obj));
         else
             out = JS_UNDEFINED;
     } else {
@@ -1126,6 +1382,68 @@ static JSValue js_loadFont(JSContext *ctx, JSValueConst this_val,
     }
     JS_FreeCString(ctx, path);
     return result;
+}
+
+/* loadImage(path) → handle (opaque int), 0 on failure.
+ * Validates the file exists, normalizes to "A:/abs/path" if needed,
+ * strdup's the path into an sg_image_handle_t kept alive forever
+ * (mirrors loadFont's "never free" catalog pattern). */
+static JSValue js_loadImage(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    const char *raw = JS_ToCString(ctx, argv[0]);
+    if (!raw) return JS_EXCEPTION;
+
+    JSValue result = JS_NewInt64(ctx, 0);
+
+    /* Strip any leading "A:" so we can stat the real file. */
+    const char *fs_path = raw;
+    if (raw[0] == 'A' && raw[1] == ':') fs_path = raw + 2;
+
+    FILE *f = fopen(fs_path, "rb");
+    if (f) {
+        fclose(f);
+
+        /* Normalize: ensure "A:" prefix. */
+        size_t needed = strlen(fs_path) + 3; /* "A:" + path + NUL */
+        char *normalized = lv_malloc(needed);
+        if (normalized) {
+            snprintf(normalized, needed, "A:%s", fs_path);
+
+            sg_image_handle_t *hdl = lv_malloc(sizeof(sg_image_handle_t));
+            if (hdl) {
+                hdl->path = normalized;  /* both intentionally never freed */
+                result = obj_to_js(ctx, (lv_obj_t *)hdl);
+            } else {
+                lv_free(normalized);
+            }
+        }
+    }
+    JS_FreeCString(ctx, raw);
+    return result;
+}
+
+/* loadImages([path, path, ...]) → [handle, handle, ...]. */
+static JSValue js_loadImages(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || !JS_IsArray(ctx, argv[0])) return JS_EXCEPTION;
+
+    JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
+    uint32_t len = 0;
+    JS_ToUint32(ctx, &len, len_val);
+    JS_FreeValue(ctx, len_val);
+
+    JSValue arr = JS_NewArray(ctx);
+    for (uint32_t i = 0; i < len; i++) {
+        JSValue item = JS_GetPropertyUint32(ctx, argv[0], i);
+        JSValueConst args[1] = { item };
+        JSValue h = js_loadImage(ctx, JS_UNDEFINED, 1, args);
+        JS_SetPropertyUint32(ctx, arr, i, h);
+        JS_FreeValue(ctx, item);
+    }
+    return arr;
 }
 
 /* setDefaultFont(handle) — make a loaded font the global default while keeping
@@ -1349,6 +1667,69 @@ static JSValue js_showMsgbox(JSContext *ctx, JSValueConst this_val,
     return obj_to_js(ctx, mbox);
 }
 
+static JSValue js_clipboardRead(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    char *text = SDL_GetClipboardText();
+    JSValue v = (text && *text) ? JS_NewString(ctx, text) : JS_NULL;
+    if (text) SDL_free(text);
+    return v;
+}
+
+static JSValue js_clipboardWrite(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    const char *s = JS_ToCString(ctx, argv[0]);
+    if (s) { SDL_SetClipboardText(s); JS_FreeCString(ctx, s); }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_findCjkFontPath(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val; (void)argc; (void)argv;
+    static const char *const candidates[] = {
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "C:/Windows/Fonts/msyh.ttc",
+        NULL
+    };
+    for (int i = 0; candidates[i]; i++) {
+        FILE *f = fopen(candidates[i], "rb");
+        if (f) { fclose(f); return JS_NewString(ctx, candidates[i]); }
+    }
+    return JS_NULL;
+}
+
+static JSValue js_setTheme(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    const char *s = JS_ToCString(ctx, argv[0]);
+    if (s) {
+        sg_theme_set_scheme(lv_display_get_default(), s);
+        JS_FreeCString(ctx, s);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_setThemeToken(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    const char *col  = JS_ToCString(ctx, argv[1]);
+    if (name && col) {
+        sg_color_t c = parse_color_ex(col);
+        sg_theme_set_token(lv_display_get_default(), name, c.color);
+    }
+    JS_FreeCString(ctx, name);
+    JS_FreeCString(ctx, col);
+    return JS_UNDEFINED;
+}
+
 /* ── Animation API ──────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -1520,6 +1901,8 @@ static const JSCFunctionListEntry lv_funcs[] = {
     JS_CFUNC_DEF("dispose",        1, js_dispose),
     JS_CFUNC_DEF("loadFont",       2, js_loadFont),
     JS_CFUNC_DEF("setDefaultFont", 1, js_setDefaultFont),
+    JS_CFUNC_DEF("loadImage",      1, js_loadImage),
+    JS_CFUNC_DEF("loadImages",     1, js_loadImages),
     JS_CFUNC_DEF("addTab",         2, js_addTab),
     JS_CFUNC_DEF("listAddButton",  2, js_listAddButton),
     JS_CFUNC_DEF("menuAddPage",    2, js_menuAddPage),
@@ -1528,6 +1911,11 @@ static const JSCFunctionListEntry lv_funcs[] = {
     JS_CFUNC_DEF("chartSetData",   3, js_chartSetData),
     JS_CFUNC_DEF("showMsgbox",     2, js_showMsgbox),
     JS_CFUNC_DEF("createAnimation",2, js_createAnimation),
+    JS_CFUNC_DEF("findCjkFontPath",0, js_findCjkFontPath),
+    JS_CFUNC_DEF("setTheme",       1, js_setTheme),
+    JS_CFUNC_DEF("setThemeToken",  2, js_setThemeToken),
+    JS_CFUNC_DEF("clipboardRead",  0, js_clipboardRead),
+    JS_CFUNC_DEF("clipboardWrite", 1, js_clipboardWrite),
 };
 
 static int lv_module_init(JSContext *ctx, JSModuleDef *m) {

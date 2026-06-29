@@ -290,7 +290,11 @@ function mountVNode(vnode, parentNative) {
         return native;
     }
 
-    const native = lv.createNode(vnode.type);
+    const native = (vnode.type === "Calendar")
+        ? lv.createNode(vnode.type, { arrowHeader: vnode.props.arrowHeader !== false })
+        : (vnode.type === "Spinner" && vnode.props.arcAngle !== undefined)
+        ? lv.createNode(vnode.type, { arcAngle: vnode.props.arcAngle })
+        : lv.createNode(vnode.type);
     vnode.native = native;
 
     if (parentNative !== undefined) lv.appendChild(parentNative, native);
@@ -449,6 +453,9 @@ const HOST_TAGS = {
     table:        "Table",
     menu:         "Menu",
     menuPage:     "MenuPage",
+    keyboard:     "Keyboard",
+    animimg:      "AnimImg",
+    imagebutton:  "ImageButton",
 };
 
 export function h(type, props, ...children) {
@@ -471,7 +478,32 @@ export function loadFont(path, size) {
     return lv.loadFont(path, size);
 }
 
+export function loadFontSizes(path, sizes) {
+    const result = {};
+    for (const sz of sizes) {
+        const h = lv.loadFont(path, sz);
+        if (h) result[sz] = h;
+    }
+    return result;
+}
+
+export function loadImage(path) {
+    return lv.loadImage(path);
+}
+
+export function loadImages(paths) {
+    return lv.loadImages(paths);
+}
+
+export function findCjkFont() {
+    return lv.findCjkFontPath();
+}
+
 export function setDefaultFont(handle) {
+    if (!handle) {
+        const p = lv.findCjkFontPath();
+        if (p) handle = lv.loadFont(p, 18);
+    }
     if (handle) lv.setDefaultFont(handle);
 }
 
@@ -497,6 +529,19 @@ export function createAnimation(node, opts) {
 
 export function setMenuPage(menu, page) {
     return lv.menuSetPage(menu, page);
+}
+
+export const clipboard = {
+    read()       { return lv.clipboardRead(); },
+    write(text)  { return lv.clipboardWrite(text); },
+};
+
+export function setTheme(scheme) {
+    return lv.setTheme(scheme);
+}
+
+export function setThemeToken(name, color) {
+    return lv.setThemeToken(name, color);
 }
 
 /* ── Mount ──────────────────────────────────────────────────────────────── */

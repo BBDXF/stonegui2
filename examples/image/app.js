@@ -7,7 +7,8 @@
  * Run:   ./build/stonegui examples/image/app.js
  * Kill:  Ctrl+C (or `timeout --signal=TERM 3 …`)
  *
- * Regenerate the test asset with:   python3 examples/image/make_png.py
+ * Refresh the test asset with:   python3 examples/image/make_png.py
+ * (downloads the 🖼️ framed-picture emoji from Twemoji CDN, CC-BY 4.0)
  */
 
 import { render, h } from "../../js/framework.js";
@@ -28,7 +29,7 @@ render(() =>
         },
     },
         h("text", {
-            text: "PNG decode test — red/green checkerboard below",
+            text: "PNG decode test — Twemoji 🖼️ framed-picture emoji below",
             style: { textColor: "#cdd6f4", fontSize: 20 },
         }),
         h("image", {
@@ -39,4 +40,4 @@ render(() =>
 );
 
 console.log("ALL TESTS PASSED — bundle mounted without throwing");
-console.log("(visually verify the 128x128 checkerboard; LVGL silently shows a broken-image glyph on decode failure)");
+console.log("(visually verify the 128x128 framed-picture emoji; LVGL silently shows a broken-image glyph on decode failure)");

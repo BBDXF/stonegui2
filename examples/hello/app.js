@@ -12,32 +12,11 @@
 import {
     h, render, createSignal, loadFont, setDefaultFont,
 } from "../../js/framework.js";
+import * as lv from "lvgl";
 
-/* ── Fonts ──
- * Tiny-TTF fonts are a fixed pixel size per handle, so we load one handle per
- * size we need. The body size becomes the GLOBAL default; the title uses a
- * larger handle as an explicit override (style.font).
- */
-const FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/System/Library/Fonts/PingFang.ttc",
-];
-
-function loadCjk(size) {
-    for (const p of FONT_CANDIDATES) {
-        const f = loadFont(p, size);
-        if (f) return f;
-    }
-    return 0;
-}
-
-const fontDefault = loadCjk(20);
-const fontTitle   = loadCjk(30);
-
-/* Make the CJK font the global default — every Text/Button inherits it. */
-setDefaultFont(fontDefault);
+setDefaultFont();
+const _cjkPath = lv.findCjkFontPath();
+const fontTitle = _cjkPath ? loadFont(_cjkPath, 30) : 0;
 
 /* ── State ── */
 const [count, setCount]       = createSignal(0);

@@ -26,6 +26,7 @@
 #include "src/drivers/sdl/lv_sdl_window.h"
 #include "src/drivers/sdl/lv_sdl_mouse.h"
 #include "src/drivers/sdl/lv_sdl_keyboard.h"
+#include "src/widgets/textarea/lv_textarea.h"
 
 #include "quickjs.h"
 #include "quickjs-libc.h"
@@ -55,16 +56,6 @@ static void on_signal(int sig) {
     g_running     = 0;
 }
 
-/* SDL event watcher — fires synchronously on every SDL_PumpEvents call (which
- * lv_timer_handler triggers via the LVGL SDL driver). We only observe; the
- * return value is ignored by SDL_AddEventWatch and the event still flows on
- * to LVGL's own SDL input handlers. */
-static int sdl_event_watch(void *userdata, SDL_Event *e) {
-    (void)userdata;
-    if (e->type == SDL_QUIT) g_running = 0;
-    return 1;
-}
-
 /* ── Hot reload (inotify) ───────────────────────────────────────────────────
  *
  * Watches the bundle's PARENT DIRECTORY (not the file directly) so we catch
@@ -77,10 +68,63 @@ static int sdl_event_watch(void *userdata, SDL_Event *e) {
  * bundle); LVGL state (window, theme, input devices, focus group) persists.
  */
 static int  g_inotify_fd        = -1;
+static lv_group_t *g_kbd_group = NULL;
 static int  g_should_reload     = 0;
 static int  g_enable_hot_reload = 1;
 static char g_bundle_dir[1024]  = "";
 static char g_bundle_name[256]  = "";
+
+static int sdl_event_watch(void *userdata, SDL_Event *e) {
+    (void)userdata;
+    if (e->type == SDL_QUIT) { g_running = 0; return 1; }
+
+    if (e->type == SDL_KEYDOWN && g_kbd_group) {
+        lv_obj_t *focused = lv_group_get_focused(g_kbd_group);
+        if (focused && lv_obj_get_class(focused) == &lv_textarea_class) {
+            SDL_Keymod mod = SDL_GetModState();
+            bool ctrl = (mod & KMOD_CTRL) != 0;
+            SDL_Keycode key = e->key.keysym.sym;
+
+            if (ctrl) {
+                switch (key) {
+                    case SDLK_a: {
+                        lv_obj_t *label = lv_textarea_get_label(focused);
+                        if (label) {
+                            lv_textarea_set_text_selection(focused, true);
+                            lv_label_set_text_selection_start(label, 0);
+                            lv_label_set_text_selection_end(label, (uint32_t)strlen(lv_textarea_get_text(focused)));
+                        }
+                        break;
+                    }
+                    case SDLK_c: {
+                        const char *t = lv_textarea_get_text(focused);
+                        if (t) SDL_SetClipboardText(t);
+                        break;
+                    }
+                    case SDLK_v: {
+                        char *clip = SDL_GetClipboardText();
+                        if (clip && *clip) lv_textarea_add_text(focused, clip);
+                        if (clip) SDL_free(clip);
+                        break;
+                    }
+                    case SDLK_x: {
+                        const char *t = lv_textarea_get_text(focused);
+                        if (t) SDL_SetClipboardText(t);
+                        lv_textarea_set_text(focused, "");
+                        break;
+                    }
+                    default: break;
+                }
+            } else {
+                if (key == SDLK_HOME)
+                    lv_textarea_set_cursor_pos(focused, 0);
+                else if (key == SDLK_END)
+                    lv_textarea_set_cursor_pos(focused, LV_TEXTAREA_CURSOR_LAST);
+            }
+        }
+    }
+    return 1;
+}
 
 static void setup_hot_reload(const char *bundle) {
     if (!g_enable_hot_reload) return;
@@ -275,6 +319,7 @@ int main(int argc, char *argv[]) {
     lv_group_set_default(group);
     lv_indev_set_group(kb, group);
     lv_bindings_set_group(group);
+    g_kbd_group = group;
 
     /* 4. QuickJS runtime */
     JSRuntime *rt = JS_NewRuntime();

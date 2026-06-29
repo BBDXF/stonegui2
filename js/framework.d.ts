@@ -20,7 +20,11 @@ declare module "lvgl" {
     export function addEvent(node: number, event: string, cb: (value?: unknown) => void): void;
     export function dispose(node: number): void;
     export function loadFont(path: string, size: number): number;
-    export function setDefaultFont(handle: number): void;
+    export function loadFontSizes(path: string, sizes: number[]): Record<number, number>;
+    export function setDefaultFont(handle?: number): void;
+    export function findCjkFontPath(): string | null;
+    export function loadImage(path: string): number;
+    export function loadImages(paths: string[]): number[];
     export function addTab(tabview: number, title: string): number;
     export function listAddButton(list: number, text: string): number;
     export function menuAddPage(menu: number, title: string): number;
@@ -73,8 +77,19 @@ export function batch<T>(fn: () => T): T;
 
 /** Load a TTF/TTC font at a fixed pixel size. Returns `0` on failure. */
 export function loadFont(path: string, size: number): number;
+export function loadFontSizes(path: string, sizes: number[]): Record<number, number>;
+export function findCjkFont(): string | null;
 /** Make a loaded font the global default (call after startup). */
-export function setDefaultFont(handle: number): void;
+export function setDefaultFont(handle?: number): void;
+
+/** Opaque integer handle returned by `loadImage` / `loadImages`. */
+export type ImageHandle = number;
+/** Validate + normalize a filesystem path into a reusable image handle.
+ *  Returns `0` if the file can't be opened. Pass directly to `<image src>`,
+ *  inside `<animimg src={[...]}>`, or to `<imagebutton released={...}/>`. */
+export function loadImage(path: string): ImageHandle;
+/** Batch helper — returns one handle per input path (0 for failures). */
+export function loadImages(paths: string[]): ImageHandle[];
 /** Read current widget state — typically inside an event handler. */
 export function getProperty(node: number, key: "value" | "checked" | "text"): unknown;
 
@@ -104,6 +119,14 @@ export function createAnimation(node: number, opts: AnimationOpts): void;
  *  declared with `<menuPage title="..." ref={(p) => myRef = p}>` so you can
  *  pass that handle here from a button's onClick. */
 export function setMenuPage(menu: number, page: number): void;
+
+export declare const clipboard: {
+    read(): string | null;
+    write(text: string): void;
+};
+
+export function setTheme(scheme: "light" | "dark"): void;
+export function setThemeToken(name: "primary"|"primary_dark"|"on_primary"|"secondary"|"bg"|"surface"|"on_surface"|"on_variant"|"outline"|"track"|"danger"|"warning", color: Color): void;
 
 /* ── View layer ──────────────────────────────────────────────────────── */
 
@@ -191,17 +214,23 @@ export interface CommonProps {
 export interface ViewProps      extends CommonProps {}
 export interface TextProps      extends CommonProps { text?: Reactive<string>; }
 export interface ButtonProps    extends CommonProps { text?: Reactive<string>; }
-export interface ImageProps     extends CommonProps { src?:  Reactive<string>; }
+export interface ImageProps     extends CommonProps { src?:  Reactive<string | ImageHandle>; }
 export interface InputProps     extends CommonProps {
     placeholder?: Reactive<string>;
     oneLine?:     Reactive<boolean>;
+    maxLength?:     Reactive<number>;
+    acceptedChars?: Reactive<string>;
+    password?:      Reactive<boolean>;
+    align?:         Reactive<"left" | "center" | "right">;
+    textSelection?: Reactive<boolean>;
+    cursorPos?:     Reactive<number>;
     onChange?:    (text: string) => void;
 }
 export interface SwitchProps    extends CommonProps { checked?: Reactive<boolean>; onChange?: (checked: boolean) => void; }
 export interface ProgressProps  extends CommonProps { value?: Reactive<number>; min?: Reactive<number>; max?: Reactive<number>; }
 export interface SliderProps    extends ProgressProps { onChange?: (value: number) => void; }
 export interface ArcProps       extends SliderProps {}
-export interface SpinnerProps   extends CommonProps { spinTime?: Reactive<number>; }
+export interface SpinnerProps   extends CommonProps { spinTime?: Reactive<number>; arcAngle?: number; }
 export interface CheckboxProps  extends CommonProps { text?: Reactive<string>; checked?: Reactive<boolean>; onChange?: (checked: boolean) => void; }
 export interface DropdownProps  extends CommonProps { options?: Reactive<string>; value?: Reactive<number>; onChange?: (selectedIndex: number) => void; }
 export interface RollerProps    extends DropdownProps {}
@@ -236,6 +265,7 @@ export interface ButtonMatrixProps extends CommonProps {
 export interface CalendarProps  extends CommonProps {
     today?:    Reactive<string>;
     shown?:    Reactive<string>;
+    arrowHeader?: boolean;
     onChange?: (date: { year: number; month: number; day: number }) => void;
 }
 export interface ScaleProps     extends CommonProps {
@@ -262,6 +292,30 @@ export interface TableProps     extends CommonProps {
 export interface MenuProps      extends CommonProps {}
 export interface MenuPageProps  extends CommonProps {
     title?: string;
+}
+export interface KeyboardProps  extends CommonProps {
+    target?: number;
+    mode?:   Reactive<"text-lower" | "text-upper" | "number" | "special">;
+}
+export interface AnimImgProps   extends CommonProps {
+    /** Frame sources — handles (preferred) or raw `"A:/..."` paths. */
+    src?:      Reactive<(string | ImageHandle)[]>;
+    /** Cycle duration in ms. */
+    duration?: Reactive<number>;
+    /** Number of cycles, or `"infinite"`. */
+    repeat?:   Reactive<number | "infinite">;
+    /** Set true to (re)start the animation. */
+    start?:    Reactive<boolean>;
+}
+export interface ImageButtonProps extends CommonProps {
+    released?:        Reactive<string | ImageHandle>;
+    pressed?:         Reactive<string | ImageHandle>;
+    disabled?:        Reactive<string | ImageHandle>;
+    checkedReleased?: Reactive<string | ImageHandle>;
+    checkedPressed?:  Reactive<string | ImageHandle>;
+    checkedDisabled?: Reactive<string | ImageHandle>;
+    /** Add `LV_OBJ_FLAG_CHECKABLE` so clicks toggle the checked state. */
+    checkable?:       Reactive<boolean>;
 }
 
 /* ── JSX intrinsics ──────────────────────────────────────────────────── */
@@ -298,6 +352,9 @@ declare global {
             table:        TableProps;
             menu:         MenuProps;
             menuPage:     MenuPageProps;
+            keyboard:     KeyboardProps;
+            animimg:      AnimImgProps;
+            imagebutton:  ImageButtonProps;
         }
     }
 }

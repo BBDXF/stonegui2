@@ -10,6 +10,7 @@
 import {
     createSignal, createEffect, createMemo, createRoot,
     onCleanup, untrack, batch, render, h, Show, For,
+    clipboard, getProperty, loadImage, loadImages,
 } from "../../js/framework.js";
 
 let pass = 0, fail = 0;
@@ -221,6 +222,119 @@ console.log("\n== Line / Table / Menu (smoke) ==");
     check(true, "mount line/table/menu/menuPage — no JS exception");
     dispose();
     check(true, "dispose line/table/menu — no JS exception");
+}
+
+console.log("\n== clipboard ==");
+{
+    const dispose = render(() => h("view", {}));
+
+    clipboard.write("test-stonegui-clip");
+    check(clipboard.read() === "test-stonegui-clip", "clipboard write+read round-trip");
+    clipboard.write("");  /* clear */
+    dispose();
+}
+
+console.log("\n== cursorPos via getProperty ==");
+{
+    let inputRef = null;
+    const dispose = render(() =>
+        h("view", {},
+          h("input", {
+              ref: (n) => inputRef = n,
+              style: { width: 200, height: 40 },
+          })
+        )
+    );
+    const pos = getProperty(inputRef, "cursorPos");
+    check(typeof pos === "number", "cursorPos getProperty returns a number");
+    dispose();
+}
+
+console.log("\n== D-E smoke (arrowHeader / arcAngle / keyboard) ==");
+{
+    let kbInputRef = null;
+    const dispose = render(() =>
+        h("view", { style: { width: "100%", height: "100%" } },
+            h("calendar", { arrowHeader: false, style: { width: 300, height: 280 } }),
+            h("spinner", { arcAngle: 270, style: { width: 60, height: 60 } }),
+            h("input", { ref: (n) => kbInputRef = n, style: { width: 200, height: 40 } }),
+            h("keyboard", { target: kbInputRef, mode: "number", style: { width: "100%", height: 200 } }),
+        )
+    );
+    check(true, "calendar without arrowHeader mounts without crash");
+    check(true, "spinner with custom arcAngle=270 mounts without crash");
+    check(true, "keyboard widget bound to input mounts without crash");
+    dispose();
+    check(true, "D-E dispose cleans up without crash");
+}
+
+console.log("\n== Image handle system ==");
+{
+    const validPath   = "/home/andy/learn/stonegui/examples/image/test.png";
+    const missingPath = "/no/such/file/__definitely_does_not_exist__.png";
+
+    const validHandle   = loadImage(validPath);
+    check(typeof validHandle === "number" && validHandle !== 0,
+          "loadImage returns truthy handle for existing file");
+
+    const missingHandle = loadImage(missingPath);
+    check(missingHandle === 0, "loadImage returns 0 for missing file");
+
+    const batch2 = loadImages([validPath, missingPath, validPath]);
+    check(Array.isArray(batch2) && batch2.length === 3,
+          "loadImages returns array of correct length");
+    check(batch2[0] !== 0 && batch2[2] !== 0, "loadImages valid entries truthy");
+    check(batch2[1] === 0, "loadImages missing entry is zero");
+
+    const handleAgain = loadImage(validPath);
+    check(typeof handleAgain === "number" && handleAgain !== 0,
+          "loadImage on same path returns a usable handle");
+}
+
+console.log("\n== <image src> accepts handle ==");
+{
+    const handle = loadImage("/home/andy/learn/stonegui/examples/image/test.png");
+    const dispose = render(() => h("view", {},
+        h("image", { src: handle, style: { width: 32, height: 32 } }),
+        h("image", { src: "A:/home/andy/learn/stonegui/examples/image/test.png",
+                     style: { width: 32, height: 32 } }),
+    ));
+    check(true, "<image> mounts with both handle and string src — no JS exception");
+    dispose();
+    check(true, "<image> dispose — no JS exception");
+}
+
+console.log("\n== <animimg> + <imagebutton> (smoke) ==");
+{
+    const frames = loadImages([
+        "/home/andy/learn/stonegui/examples/animimg/frame1.png",
+        "/home/andy/learn/stonegui/examples/animimg/frame2.png",
+        "/home/andy/learn/stonegui/examples/animimg/frame3.png",
+    ]);
+    const released = loadImage("/home/andy/learn/stonegui/examples/imagebutton/released.png");
+    const pressed  = loadImage("/home/andy/learn/stonegui/examples/imagebutton/pressed.png");
+
+    check(frames.every((f) => f !== 0), "animimg frames all loaded");
+    check(released !== 0 && pressed !== 0, "imagebutton state PNGs loaded");
+
+    const dispose = render(() => h("view", {},
+        h("animimg", {
+            src: frames,
+            duration: 500,
+            repeat: "infinite",
+            start: true,
+            style: { width: 64, height: 64 },
+        }),
+        h("imagebutton", {
+            released: released,
+            pressed: pressed,
+            checkable: true,
+            style: { width: 64, height: 64 },
+        }),
+    ));
+    check(true, "mount animimg + imagebutton — no JS exception");
+    dispose();
+    check(true, "dispose animimg + imagebutton — no JS exception");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
