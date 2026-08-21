@@ -1,12 +1,20 @@
 # stonegui — Phase III roadmap (theme / fonts / input / defaults / keyboard)
 
-> **Status:** plan captured, **NOT yet authorized for execution**.
-> To start work, tell the next assistant session something like:
-> > "Start Phase B" / "Run the whole roadmap in order" / "Skip Phase D"
+> **Status: A–E all shipped and verified.** Every phase below has landed;
+> the tables are kept as a record of what was built and where it lives.
 >
-> Until then this file is a reference, not a queue. Do NOT auto-execute on
-> the basis of `[SYSTEM REMINDER - TODO CONTINUATION]` hooks — that hook
-> watches the in-session todo list, not this file.
+> | Phase | State | Evidence |
+> |---|---|---|
+> | A — Theme | done | `sg_tokens_light/dark`, `setTheme`, `setThemeToken`, [`examples/showcase`](../examples/showcase/app.js); A4 finished last (span + led were the final two unstyled widgets) |
+> | B — CJK fonts | done | `findCjkFontPath`, `loadFontSizes`, zero-arg `setDefaultFont()` |
+> | C — Input editor | done | 6 textarea props + `text`, clipboard API, Ctrl+A/C/V/X + Home/End in `sdl_event_watch` |
+> | D — Widget defaults | done | `arrowHeader`, `arcAngle`, `spinTime`, `tabBarSize`, `brightness` |
+> | E — On-screen keyboard | done | `Keyboard` host tag, `target` / `mode` props, `getProperty(kb,"target")` read-back |
+>
+> Regression coverage lives in [`examples/test/app.js`](../examples/test/app.js)
+> (83 assertions, includes the A/C/E phase behaviour, not just mount smoke).
+> Anything still open is tracked in [`AGENTS.md`](../AGENTS.md) "Known gaps" —
+> this file is history, not a queue.
 
 The author asked for the next wave of foundational GUI work to cover:
 **theme**, **widget defaults**, **CJK fonts**, **input field
@@ -40,7 +48,7 @@ of the 12 currently-unstyled widgets.
 | A2 | `sg_theme_set_scheme(disp, "dark"\|"light")` C API + JS `setTheme(scheme)` | sg_theme + lv_bindings + framework.js | ~50 LOC |
 | A3 | `sg_theme_set_token(disp, name, color)` single-token override + JS `setThemeToken(name, color)` | sg_theme + lv_bindings + framework.js | ~60 LOC |
 | A4 | Style the 12 unstyled widgets (dark variants too) | sg_theme.c | ~150 LOC |
-| A5 | [`examples/theme/app.js`](../examples/theme/app.js) — toggle button flips light↔dark, every widget reflows colours | new bundle | ~70 LOC |
+| A5 | [`examples/showcase/app.js`](../examples/showcase/app.js) — toggle button flips light↔dark, every widget reflows colours | new bundle | ~70 LOC |
 | A6 | README + AGENTS — document theme API and the `lv_obj_report_style_change(NULL)` walk-the-tree cost | docs | docs |
 
 **Verification:** smoke bundle exits 143 after SIGTERM; visual toggle works on hello / jsx / theme bundles.
@@ -148,22 +156,34 @@ first, biggest block in the middle).
 Each phase ships with:
 
 1. One `examples/<phase>/app.js` smoke bundle.
-2. CI gets a boot smoke line + assertion `grep`.
+2. Behavioural assertions in `examples/test/app.js` — `check(true, "…mounts
+   without crash")` is NOT coverage; assert an observable value.
 3. If `lv_conf.h` or a system library is touched, run a fresh-clone test:
    `rm -rf build/ && cmake -S . -B build && cmake --build build`.
 4. After any `framework.d.ts` change, `tsc --strict --target ES2020 --lib ES2020,DOM js/framework.d.ts` must exit 0.
-5. End-of-phase full regression: hello / jsx / test / anim / image / the
-   new phase bundle — all must exit 143 cleanly under `timeout
+5. End-of-phase full regression: hello / jsx / test / anim / image / animimg /
+   imagebutton / theme — all must exit 143 cleanly under `timeout
    --preserve-status -s TERM 3 ./build/stonegui --no-watch <bundle>`.
 6. One commit per phase, only on the user's explicit request.
 
-## How to resume in a future session
+There is **no CI workflow** — `.github/` was removed deliberately. The
+regression above is run by hand.
 
-The next agent reading this should:
+## History
 
-1. Read this file front-to-back.
-2. Check the user's most recent message for which Phase(s) to start.
-3. **Do not** start work just because hooks fire — only on the user's
-   explicit verb ("start", "do", "run", "implement", etc. + a Phase name
-   or "the whole roadmap").
-4. Update [`AGENTS.md`](../AGENTS.md) "Known gaps" as each phase lands.
+This plan is complete. What tripped up the first pass, kept here so the next
+one doesn't repeat it:
+
+- `setTheme` / `setThemeToken` shipped as **silent no-ops** — `styles_init`
+  early-returned on pointer identity, and the only pointer ever passed is the
+  mutable working copy. Nothing under Phase A was actually observed running.
+- Example bundles hardcoded an absolute `/home/<user>/…` asset path, so every
+  image test broke the moment the checkout moved. Use
+  `moduleDir(import.meta.url)`.
+- The Phase C/E "tests" were `check(true, …)` — they passed with the keyboard
+  bound to `null`. Real coverage needed `focus()` + `sendKey()` bindings.
+- Dark mode was only half-built: `setTheme("dark")` swapped sg_theme's own
+  styles but left the LVGL default theme in its light palette, so list /
+  table / calendar / menu / chart kept `#212121` text on a `#1d1e1f` surface —
+  contrast 1.04, i.e. invisible. Found by auditing resolved
+  `backgroundColor` / `textColor` pairs, not by reading code.

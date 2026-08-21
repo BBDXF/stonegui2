@@ -36,7 +36,7 @@
 
 #define DISPLAY_WIDTH  800
 #define DISPLAY_HEIGHT 480
-#define BUNDLE_PATH    "examples/hello/app.js"
+#define BUNDLE_PATH    "examples/showcase/app.js"
 
 /* ── Shutdown signalling ────────────────────────────────────────────────────
  *
@@ -257,6 +257,16 @@ static int load_and_run(JSContext *ctx, const char *path) {
     free(buf);
     if (JS_IsException(val)) {
         js_std_dump_error(ctx);
+        return -1;
+    }
+
+    /* Imported modules get import.meta from js_module_loader; the entry bundle
+     * is compiled here, so it needs the same treatment or `import.meta.url`
+     * would be undefined. use_realpath=true → an absolute path bundles can
+     * derive asset locations from regardless of CWD. */
+    if (js_module_set_import_meta(ctx, val, true, true) < 0) {
+        js_std_dump_error(ctx);
+        JS_FreeValue(ctx, val);
         return -1;
     }
 

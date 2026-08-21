@@ -6,30 +6,60 @@
  */
 
 declare module "lvgl" {
+    /* Mirrors the `lv_funcs` export list in `src/lv_bindings.c`. Deliberately
+     * omitted: `getParent`, `getChild` and `createThemeCoverageMenuInternals`,
+     * which exist only for the theme-coverage assertions in `examples/test`
+     * and are not part of the app-facing surface. There is no native
+     * `loadFontSizes` — that helper is pure JS in `framework.js`. */
     export function getScreen(): number;
     export function createNode(type: string): number;
     export function appendChild(parent: number, child: number): void;
     export function removeChild(parent: number, child: number): void;
+    /** Throws `TypeError` for an unknown state or an unusable selector. */
     export function setProperty(
         node: number,
         key: string,
         value: unknown,
-        state?: "hover" | "focus" | "pressed" | "disabled",
+        selector?: PseudoState | StyleSelector,
     ): void;
-    export function getProperty(node: number, key: string): unknown;
+    /** Raw, UNVALIDATED getter. Reads `selector.part` / `selector.state` if
+     *  present but does not reject bad ones, and returns `undefined` for a key
+     *  it does not know. Use the framework `getProperty` wrapper to get the
+     *  `TypeError`s. */
+    export function getProperty(node: number, key: string, selector?: {
+        part?: string;
+        state?: string;
+    }): unknown;
+    export function updateLayout(node: number): void;
     export function addEvent(node: number, event: string, cb: (value?: unknown) => void): void;
     export function dispose(node: number): void;
     export function loadFont(path: string, size: number): number;
-    export function loadFontSizes(path: string, sizes: number[]): Record<number, number>;
-    export function setDefaultFont(handle?: number): void;
+    export function setDefaultFont(
+        handle?: number | Partial<Record<14 | 16 | 20 | 24, number>>,
+    ): void;
     export function findCjkFontPath(): string | null;
+    /** Throws `TypeError` for an unknown name or for an integer-kind token. */
+    export function getThemeToken(name: ColorThemeTokenName): Color;
+    /** The integer half of the registry. Throws `TypeError` for an unknown
+     *  name or for a colour-kind token. */
+    export function getThemeMetric(name: IntegerThemeTokenName): number;
+    export function setTheme(scheme: ThemeScheme): void;
+    /** Throws `TypeError` for an unknown name or a value of the wrong kind. */
+    export function setThemeToken(name: ColorThemeTokenName, value: Color): void;
+    export function setThemeToken(name: IntegerThemeTokenName, value: number): void;
     export function loadImage(path: string): number;
     export function loadImages(paths: string[]): number[];
+    export function focus(node: number): boolean;
+    export function sendKey(key: string, ctrl?: boolean): boolean;
+    export function sendEvent(node: number, event: "click" | "released" | "change"): boolean;
+    export function clipboardRead(): string | null;
+    export function clipboardWrite(text: string): void;
     export function addTab(tabview: number, title: string): number;
     export function listAddButton(list: number, text: string): number;
     export function menuAddPage(menu: number, title: string): number;
     export function menuSetPage(menu: number, page: number): void;
     export function chartAddSeries(chart: number, color: string): number;
+    export function chartSetSeriesColor(chart: number, series: number, color: string): void;
     export function chartSetData(chart: number, series: number, data: number[]): void;
     export function showMsgbox(
         opts: { title?: string; text?: string; buttons?: string[] },
@@ -75,12 +105,22 @@ export function batch<T>(fn: () => T): T;
 
 /* ── Native helpers ──────────────────────────────────────────────────── */
 
-/** Load a TTF/TTC font at a fixed pixel size. Returns `0` on failure. */
+/** Load a TTF/TTC font at a fixed pixel size. Returns `0` on failure.
+ *  Handles are cached per `(path, size)` and the file bytes are shared by
+ *  path, so loading four sizes reads the file once and never frees it. */
 export function loadFont(path: string, size: number): number;
-export function loadFontSizes(path: string, sizes: number[]): Record<number, number>;
+/** Load several sizes of one file. Pure JS over `loadFont`. A size that
+ *  fails to load is OMITTED from the result, so every lookup is
+ *  possibly-undefined — never `0`. */
+export function loadFontSizes(path: string, sizes: number[]): Partial<Record<number, number>>;
 export function findCjkFont(): string | null;
-/** Make a loaded font the global default (call after startup). */
-export function setDefaultFont(handle?: number): void;
+/** Install the default typography roles. With no argument it auto-discovers
+ *  a CJK font and loads the 14/16/20/24 role sizes; pass a handle to use one
+ *  face everywhere, or a partial size→handle map to set roles individually.
+ *  A no-op when no font is found — call it after startup, before mounting. */
+export function setDefaultFont(
+    handle?: number | Partial<Record<14 | 16 | 20 | 24, number>>,
+): void;
 
 /** Opaque integer handle returned by `loadImage` / `loadImages`. */
 export type ImageHandle = number;
@@ -90,10 +130,69 @@ export type ImageHandle = number;
 export function loadImage(path: string): ImageHandle;
 /** Batch helper — returns one handle per input path (0 for failures). */
 export function loadImages(paths: string[]): ImageHandle[];
-/** Read current widget state — typically inside an event handler. */
-export function getProperty(node: number, key: "value" | "checked" | "text"): unknown;
+/** Read current widget state — typically inside an event handler. The
+ *  geometry keys ("width"/"height"/"x"/"y"/"visible") need a preceding
+ *  {@link updateLayout} call, otherwise they read the pre-layout 0.
+ *  Resolved style keys accept a part/state selector; `padding` reports the
+ *  resolved top padding (`pad_top`). Widget-state keys return `undefined`
+ *  on a widget class that does not carry them. */
+export interface GetPropertyResults {
+    value:            number | undefined;
+    checked:          boolean;
+    text:             string | undefined;
+    cursorPos:        number | undefined;
+    target:           number | undefined;
+    scrollable:       boolean;
+    visible:          boolean;
+    width:            number;
+    height:           number;
+    x:                number;
+    y:                number;
+    backgroundColor:  Color;
+    textColor:        Color;
+    borderColor:      Color;
+    borderWidth:      number;
+    outlineColor:     Color;
+    outlineWidth:     number;
+    radius:           number;
+    padding:          number;
+    shadowWidth:      number;
+    shadowOpa:        number;
+    bgOpa:            number;
+    imageOpa:         number;
+    textOpa:          number;
+    borderOpa:        number;
+    lineColor:        Color;
+    lineWidth:        number;
+    arcColor:         Color;
+    arcWidth:         number;
+    fontLineHeight:   number;
+}
+export type GetPropertyKey = keyof GetPropertyResults;
+/** Resolved-style selector. Every listed part and state is accepted by the
+ *  native parser (`parse_part` / `parse_resolved_state`). Anything else is
+ *  rejected by the `framework.js` wrappers with a `TypeError` — the raw
+ *  `lvgl` module does not validate, it falls back to an unspecified
+ *  selector. */
+export interface StyleSelector {
+    readonly part?: StylePart;
+    readonly state?: ResolvedState;
+}
+export function getProperty<K extends GetPropertyKey>(
+    node: number,
+    key: K,
+    selector?: StyleSelector,
+): GetPropertyResults[K];
+
+/** Flush pending layout for a subtree so the geometry getters return final
+ *  coordinates. LVGL otherwise recomputes positions only inside its timer
+ *  handler, so measuring straight after mount sees everything at 0,0. */
+export function updateLayout(node: number): void;
 
 export function chartAddSeries(chart: number, color: Color): number;
+/** Repaints an existing series. `chartAddSeries` copies the colour into the
+ *  series, so a theme repaint alone never reaches an already-created one. */
+export function chartSetSeriesColor(chart: number, series: number, color: Color): void;
 export function chartSetData(chart: number, series: number, data: number[]): void;
 
 export interface MsgboxOpts {
@@ -125,8 +224,38 @@ export declare const clipboard: {
     write(text: string): void;
 };
 
-export function setTheme(scheme: "light" | "dark"): void;
-export function setThemeToken(name: "primary"|"primary_dark"|"on_primary"|"secondary"|"bg"|"surface"|"on_surface"|"on_variant"|"outline"|"track"|"danger"|"warning", color: Color): void;
+/** Absolute directory of the module whose `import.meta.url` is passed in —
+ *  the CWD-independent way for a bundle to locate its own assets. */
+export function moduleDir(importMetaUrl: string): string;
+
+/** Move keyboard focus to a widget in the global focus group. */
+export function focus(node: number): boolean;
+
+/** Inject an SDL key press ("a".."z", "home", "end") for smoke tests and
+ *  automation. Ctrl combos drive the `<input>` clipboard shortcuts. */
+export function sendKey(key: string, ctrl?: boolean): boolean;
+
+/** Swap the whole live token set. Every mounted widget repaints in place;
+ *  nothing is remounted and JS local styles survive. */
+export type ThemeScheme = "light" | "dark";
+export function setTheme(scheme: ThemeScheme): void;
+
+/** Integer-valued tokens (geometry, spacing, stroke, elevation, opacity).
+ *  `radius_btn` / `radius_field` default to `radius_base` but are patchable
+ *  independently. */
+export type IntegerThemeTokenName =
+    | "radius_base" | "radius_small" | "radius_round" | "border_width"
+    | "space_xs" | "space_sm" | "space_md" | "space_lg" | "space_xl" | "control_height"
+    | "slider_track_size" | "slider_knob_size" | "arc_width" | "scrollbar_size"
+    | "shadow_small_width" | "shadow_overlay_width" | "shadow_opa" | "disabled_opa"
+    | "overlay_mask_opa" | "btn_pad_hor" | "btn_pad_ver"
+    | "radius_btn" | "radius_field";
+export type ThemeTokenName = ColorThemeTokenName | IntegerThemeTokenName;
+/** Patch one live token. Colour tokens take a {@link Color}, integer tokens
+ *  take a number; the pairing is checked here and again at runtime, where a
+ *  mismatched kind or unknown name throws a `TypeError`. */
+export function setThemeToken(name: ColorThemeTokenName, value: Color): void;
+export function setThemeToken(name: IntegerThemeTokenName, value: number): void;
 
 /* ── View layer ──────────────────────────────────────────────────────── */
 
@@ -168,12 +297,39 @@ export const For: <T>(props: ForProps<T>) => VNode;
 
 /** "#rrggbb" / "#rrggbbaa" / named ("red","blue","gray", etc.). See parse_color_ex. */
 export type Color = string;
+export type ColorThemeTokenName =
+    | "primary.base" | "primary.light_3" | "primary.light_5" | "primary.light_7" | "primary.light_9" | "primary.dark_2"
+    | "success.base" | "success.light_3" | "success.light_5" | "success.light_7" | "success.light_9" | "success.dark_2"
+    | "warning.base" | "warning.light_3" | "warning.light_5" | "warning.light_7" | "warning.light_9" | "warning.dark_2"
+    | "danger.base" | "danger.light_3" | "danger.light_5" | "danger.light_7" | "danger.light_9" | "danger.dark_2"
+    | "error.base" | "error.light_3" | "error.light_5" | "error.light_7" | "error.light_9" | "error.dark_2"
+    | "info.base" | "info.light_3" | "info.light_5" | "info.light_7" | "info.light_9" | "info.dark_2"
+    | "text_primary" | "text_regular" | "text_secondary" | "text_placeholder" | "text_disabled"
+    | "border_base" | "border_light" | "border_lighter" | "border_extra_light" | "border_dark" | "border_darker"
+    | "fill_base" | "fill_light" | "fill_lighter" | "fill_extra_light" | "fill_dark" | "fill_darker" | "fill_blank"
+    | "bg_page" | "bg_base" | "bg_overlay" | "overlay_mask" | "white" | "black"
+    | "primary" | "primary_dark" | "on_primary" | "secondary" | "bg" | "surface"
+    | "on_surface" | "on_variant" | "outline" | "track" | "danger" | "warning";
+/** `"$<colour token>"` resolves live: the widget repaints on every
+ *  `setTheme` / `setThemeToken`. Only `backgroundColor`, `borderColor` and
+ *  `textColor` resolve references; elsewhere a `$…` string stays literal.
+ *  A name outside {@link ColorThemeTokenName} throws a `TypeError` at mount,
+ *  and a template-literal string built at runtime is not checked here. */
+export type ThemeColorReference = `$${ColorThemeTokenName}`;
+export type StyleColor = Color | ThemeColorReference;
 /** Number = px; "NN%" = percent of parent; "fill" = 100%. */
-export type Size = number | `${number}%` | "fill";
+export type Size = number | `${number}%` | "fill" | "auto";
 
-export type PseudoState = "hover" | "focus" | "pressed" | "disabled";
+/** States a `style` object may nest. `default` re-states the base state
+ *  explicitly; `checked` targets toggled switches/checkboxes/buttons. */
+export type PseudoState = "default" | "hover" | "focus" | "pressed" | "checked" | "disabled";
+/** Extra read-only states the resolved getters accept on top of the
+ *  writable {@link PseudoState} set. */
+export type ResolvedState = PseudoState | "focusKey" | "edited" | "scrolled";
+export type StylePart = "main" | "scrollbar" | "indicator" | "knob" | "selected"
+    | "items" | "cursor" | "placeholder";
 
-export interface StyleProps {
+export interface StyleValues {
     width?:           Reactive<Size>;
     height?:          Reactive<Size>;
     x?:               Reactive<number>;
@@ -184,19 +340,26 @@ export interface StyleProps {
     alignItems?:      Reactive<"start" | "center" | "end" | "between" | "around" | "evenly">;
     justifyContent?:  Reactive<"start" | "center" | "end" | "between" | "around" | "evenly">;
     padding?:         Reactive<number>;
-    backgroundColor?: Reactive<Color>;
+    backgroundColor?: Reactive<StyleColor>;
     borderRadius?:    Reactive<number>;
     borderWidth?:     Reactive<number>;
-    borderColor?:     Reactive<Color>;
-    textColor?:       Reactive<Color>;
+    borderColor?:     Reactive<StyleColor>;
+    textColor?:       Reactive<StyleColor>;
     fontSize?:        Reactive<14 | 16 | 20 | 24>;
     font?:            Reactive<number>;
     scrollable?:      Reactive<boolean>;
+}
 
-    hover?:    StyleProps;
-    focus?:    StyleProps;
-    pressed?:  StyleProps;
-    disabled?: StyleProps;
+/** Base-state values plus at most one level of pseudo-state nesting.
+ *  Nesting a state inside a state is rejected at runtime with a `TypeError`. */
+export type PartStyleProps = StyleValues & {
+    readonly [S in PseudoState]?: StyleValues;
+};
+
+export interface StyleProps extends PartStyleProps {
+    /** Per-part overrides. Distinct from `SpanProps.parts`, which is span
+     *  text runs. An unlisted part name throws a `TypeError` at mount. */
+    partStyles?: Partial<Record<StylePart, PartStyleProps>>;
 }
 
 /* ── Widget props (per host tag) ─────────────────────────────────────── */

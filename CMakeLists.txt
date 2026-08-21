@@ -94,10 +94,13 @@ target_link_libraries(stonegui PRIVATE
 target_compile_definitions(stonegui PRIVATE _GNU_SOURCE)
 
 # Copy JS / examples next to the binary so runtime relative imports resolve.
-add_custom_command(TARGET stonegui POST_BUILD
+# This target runs on every normal build because source-only JS changes do not
+# otherwise relink `stonegui`, leaving the build-tree runtime copy stale.
+add_custom_target(stonegui_runtime_assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/js ${CMAKE_BINARY_DIR}/js
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/examples ${CMAKE_BINARY_DIR}/examples
+    DEPENDS stonegui
     COMMENT "Copying JS files to build directory"
 )

@@ -48,7 +48,7 @@ LVGL **9.2.2** and QuickJS **2025-09-13** are fetched from GitHub via CMake
 ```sh
 cmake -S . -B build
 cmake --build build
-./build/stonegui                       # runs examples/hello/app.js
+./build/stonegui                       # runs examples/showcase/app.js
 ./build/stonegui examples/jsx/app.js   # or pass a bundle explicitly
 ```
 
@@ -60,9 +60,16 @@ for offline work or upstream hacking.
 Press `Ctrl+C` or close the window to exit cleanly (`lv_deinit` →
 `JS_FreeRuntime` → `SDL_Quit`, exit code `128+signo`).
 
+Run the canonical full regression from the repository root:
+
+```sh
+./scripts/run_regression.sh
+./scripts/run_regression.sh --skip-jsx-build  # repeat without rebuilding JSX
+```
+
 ## Components (host tags)
 
-30 lowercase JSX host tags map to LVGL widgets. Capitalised aliases also work.
+31 lowercase JSX host tags map to LVGL widgets. Capitalised aliases also work.
 See [`js/framework.d.ts`](js/framework.d.ts) and
 [`HOST_TAGS`](js/framework.js) for the authoritative list.
 
@@ -96,6 +103,7 @@ See [`js/framework.d.ts`](js/framework.d.ts) and
 | `table`        | `lv_table`          | Grid: `rows`/`cols` + `cells={[[…]]}`  |
 | `menu`         | `lv_menu`           | Multi-page menu container              |
 | `menuPage`     | (internal)          | Menu page; first one auto-activates    |
+| `keyboard`     | `lv_keyboard`       | On-screen keyboard, `target={inputRef}` |
 | `animimg`      | `lv_animimg`        | Multi-frame image loop (PNG/JPG/BMP)   |
 | `imagebutton`  | `lv_imagebutton`    | Per-state image button (released/pressed/checked) |
 
@@ -175,6 +183,16 @@ const frames = loadImages([                            // batch
 ]);
 ```
 
+Bundles should locate their own assets with `moduleDir(import.meta.url)`
+rather than an absolute path — the binary resolves relative imports against
+its CWD, but `moduleDir` returns the bundle's real directory either way:
+
+```js
+import { moduleDir, loadImage } from "../../js/framework.js";
+const ASSETS = moduleDir(import.meta.url);
+const logo   = loadImage(`${ASSETS}/logo.png`);
+```
+
 `loadImage` validates the file with `fopen`, auto-prepends the `A:` prefix
 if you pass a `/`-absolute path, and returns an opaque integer handle (just
 like `loadFont`). Handles live for the lifetime of the runtime — they are
@@ -219,17 +237,16 @@ Six state props accept handles or strings: `released`, `pressed`,
 Stonegui binds the solid-image variant — the LVGL 9-patch 3-tile API is
 not exposed (no `*_mid` / `*_right` props).
 
-Run the bundled smoke tests:
+The image family (static `<image>`, `<animimg>` loop, per-state
+`<imagebutton>`) is demonstrated in the showcase's "图像家族" card:
 
 ```sh
-./build/stonegui examples/image/app.js          # single PNG
-./build/stonegui examples/animimg/app.js        # 3-frame loop
-./build/stonegui examples/imagebutton/app.js    # released vs pressed
+./build/stonegui examples/showcase/app.js       # see the "图像家族" media card
 ```
 
-Refresh the test assets with their adjacent `make_*.py` scripts (Python
-stdlib only — they pull 72×72 PNGs from the
-[Twemoji](https://github.com/twitter/twemoji) CDN). Twemoji graphics are
+Refresh the test assets with the adjacent `make_*.py` scripts in
+`examples/showcase/assets/` (Python stdlib only — they pull 72×72 PNGs from
+the [Twemoji](https://github.com/twitter/twemoji) CDN). Twemoji graphics are
 CC-BY 4.0 © Twitter Inc and other contributors.
 
 ## Pseudo-state styles
@@ -246,7 +263,30 @@ CC-BY 4.0 © Twitter Inc and other contributors.
 ```
 
 Pseudo-state objects nest inside `style`; their entries apply with the
-matching LVGL state selector (`hover` / `focus` / `pressed` / `disabled`).
+matching LVGL state selector. Supported states are `default`, `hover`,
+`focus`, `pressed`, `checked` and `disabled`. Nesting is exactly one level
+deep: a style object inside a state object throws a `TypeError`.
+
+## Part styles
+
+Sub-parts of a widget are styled through `partStyles`, keyed by part name:
+
+```jsx
+<slider style={{
+    partStyles: {
+        indicator: { backgroundColor: "$primary.base" },
+        knob:      { backgroundColor: "$white", pressed: { backgroundColor: "$fill_dark" } },
+    },
+}} />
+```
+
+Supported parts: `main`, `scrollbar`, `indicator`, `knob`, `selected`,
+`items`, `cursor`, `placeholder`. Each part accepts the same base values as
+`style` plus one level of pseudo-state nesting. An unknown part name throws
+a `TypeError` at mount.
+
+`partStyles` is unrelated to `<span parts={…}>`, which describes styled text
+runs inside one span widget.
 
 ## Animations
 
@@ -270,24 +310,78 @@ animation finishes (or after every loop when repeating).
 
 ## Theme (Element Plus)
 
-stonegui ships with a Vue Element Plus–inspired theme (primary `#409EFF`,
-4 px radius, flat buttons). Switch between light and dark at runtime:
+stonegui ships a self-contained Element Plus theme. It is installed with
+`parent = NULL`, so stonegui owns every one of LVGL's ten theme slots and
+nothing is inherited from LVGL's default theme. Every visible rule (colour,
+radius, spacing, stroke, elevation, typography) comes from stonegui's own
+token set; your inline `style={…}` always wins over it.
+
+Switch scheme or patch a single token at runtime:
 
 ```js
 import { setTheme, setThemeToken } from "./js/framework.js";
 
-setTheme("dark");                         // full dark mode
-setTheme("light");                        // back to light
-setThemeToken("primary", "#e74c3c");      // override one token
+setTheme("dark");                          // full dark mode
+setTheme("light");                         // back to light
+setThemeToken("primary.base", "#e74c3c");  // colour token takes a colour
+setThemeToken("radius_base", 8);           // integer token takes a number
 ```
 
-Available token names: `primary`, `primary_dark`, `on_primary`, `secondary`,
-`bg`, `surface`, `on_surface`, `on_variant`, `outline`, `track`,
-`danger`, `warning`.
+Tokens are typed. Colour tokens are the six semantic ramps
+(`primary` / `success` / `warning` / `danger` (alias `error`) / `info`, each
+with `.base`, `.light_3`, `.light_5`, `.light_7`, `.light_9`, `.dark_2`) plus
+the neutral roles (`text_primary`, `text_regular`, `text_secondary`,
+`text_placeholder`, `text_disabled`, the `border_*` / `fill_*` / `bg_*`
+families, `overlay_mask`, `white`, `black`). Integer tokens are the metrics
+(`radius_base`, `radius_small`, `radius_round`, `border_width`, `space_xs`…
+`space_xl`, `control_height`, `slider_track_size`, `slider_knob_size`,
+`arc_width`, `scrollbar_size`, `shadow_small_width`, `shadow_overlay_width`,
+`shadow_opa`, `disabled_opa`, `overlay_mask_opa`, `btn_pad_hor`,
+`btn_pad_ver`, `radius_btn`, `radius_field`). The older flat names
+(`primary`, `primary_dark`, `on_primary`, `secondary`, `bg`, `surface`,
+`on_surface`, `on_variant`, `outline`, `track`, `danger`, `warning`) still
+work as aliases of the canonical roles. `doc/theme.md` is the authoritative
+list with exact hex values.
 
-`setTheme` / `setThemeToken` both call `lv_obj_report_style_change(NULL)` —
-every widget repaints. On a 200-widget screen this takes ~1-2 ms; it is
-intended for theme toggle, not per-frame animation.
+An unknown token name, or a value of the wrong kind (a number for a colour
+token, a colour for an integer token), throws a `TypeError`. The full set is
+also declared in `js/framework.d.ts`, so the mismatch is a compile error in
+a TS-aware editor.
+
+### Live token references in `style`
+
+`backgroundColor`, `borderColor` and `textColor` accept a `"$token"` string
+that resolves against the live theme and re-resolves on every `setTheme` /
+`setThemeToken`:
+
+```jsx
+<view style={{ backgroundColor: "$bg_base", textColor: "$text_primary" }} />
+```
+
+Only those three properties resolve references; anywhere else a `$…` string
+stays a literal. Only colour tokens can be referenced, and a name that is not
+a colour token throws a `TypeError` when the style is applied.
+
+`setTheme` / `setThemeToken` both rebuild the shared styles in place and call
+`lv_obj_report_style_change(NULL)` — every widget repaints, nothing is
+remounted, and your local styles survive. On a 200-widget screen this takes
+~1-2 ms; it is intended for theme toggle, not per-frame animation.
+
+### Reading resolved styles
+
+`getProperty(node, key, selector?)` reports what the theme plus your inline
+styles actually resolved to, for any part/state combination:
+
+```js
+import { getProperty } from "./js/framework.js";
+
+getProperty(slider, "backgroundColor", { part: "knob" });
+getProperty(button, "backgroundColor", { state: "disabled" });
+```
+
+Selector parts are the `partStyles` parts; selector states are the pseudo
+states plus the read-only `focusKey`, `edited` and `scrolled`. An unknown
+key, part or state throws a `TypeError` instead of silently returning black.
 
 ## Hot reload
 
@@ -298,21 +392,32 @@ the bundle re-executes from the top. LVGL state (window, theme, input
 devices, focus group) persists; JS state (signals, `loadFont` handles,
 animations) does not — re-initialise it in the bundle's top level.
 
-Disable with `--no-watch`. CI passes `--no-watch` for the smoke test.
+Disable with `--no-watch` (also what the smoke-test loop uses).
 
 ## CJK font auto-discovery
 
 `setDefaultFont()` with no argument auto-discovers the first installed CJK
-font from a built-in candidate list and loads it at 18 px:
+font from a built-in candidate list and loads it at the four typography role
+sizes 14 / 16 / 20 / 24 px:
 
 ```js
 import { setDefaultFont, findCjkFont, loadFontSizes } from "./js/framework.js";
 
-setDefaultFont();               // zero-config — auto-discovers CJK at 18 px
+setDefaultFont();               // zero-config — auto-discovers CJK at 14/16/20/24
 
 const path = findCjkFont();     // returns path string or null
-const fonts = loadFontSizes(path, [14, 18, 24]);  // {14: h, 18: h, 24: h}
+const fonts = loadFontSizes(path, [14, 16, 20, 24]);  // {14: h, 16: h, 20: h, 24: h}
+                                // a size that fails to load is omitted, not 0
+setDefaultFont(fonts);          // or pass a partial map: { 14: h, 20: h }
 ```
+
+If no CJK font is installed, `setDefaultFont()` is a no-op and text falls
+back to the built-in Latin-only Montserrat face.
+
+Font handles are cached per `(path, size)` and the decoded file bytes are
+shared by path, so loading four sizes of one file reads it once. Tiny-TTF
+keeps that buffer by reference, so neither the bytes nor the font objects are
+ever freed.
 
 Candidate paths probed in order:
 1. `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`
@@ -354,6 +459,7 @@ All props may be reactive (`() => signal()`).
 
 | Prop | Type | Description |
 |---|---|---|
+| `text` | string | The field's content |
 | `placeholder` | string | Ghost text when empty |
 | `oneLine` | boolean | Single-line mode |
 | `maxLength` | number | Max character count (0 = unlimited) |
@@ -371,6 +477,17 @@ const s = clipboard.read();   // returns string or null
 ```
 
 Ctrl+A/C/V/X and Home/End work automatically in any focused `<input>`.
+
+Focus and key injection are scriptable, which is how the shortcut round-trip
+is regression-tested:
+
+```js
+import { focus, sendKey } from "./js/framework.js";
+
+focus(inputRef);            // lv_group_focus_obj
+sendKey("c", true);         // Ctrl+C into the focused widget
+sendKey("end");             // Home / End also supported
+```
 
 ## Keyboard input
 
@@ -391,21 +508,28 @@ so the IME's candidate window follows the input box.
 ## TypeScript support
 
 [`js/framework.d.ts`](js/framework.d.ts) ships full type declarations for
-the public API + JSX intrinsics + per-widget props + pseudo-state styles.
-VS Code and other LSP editors pick it up automatically for `.js` and `.jsx`
-files — no `tsconfig.json` required.
+the public API + JSX intrinsics + per-widget props + pseudo-state and part
+styles + typed theme tokens. VS Code and other LSP editors pick it up
+automatically for `.js` and `.jsx` files — no `tsconfig.json` required.
+
+Colour and integer theme tokens are separate unions, so `setThemeToken` is a
+compile error when the value kind does not match the name. Resolved-style
+getters are keyed too: `getProperty(node, "backgroundColor")` is a colour
+string, `getProperty(node, "radius")` is a number. There is no CI — type-check
+the declarations by hand after every `framework.d.ts` edit:
+
+```sh
+npx -y -p typescript@5 tsc --strict --target ES2020 --lib ES2020,DOM \
+    --noEmit js/framework.d.ts
+```
 
 ## Examples
 
 | Path                  | What it shows                                    |
 | --------------------- | ------------------------------------------------ |
-| `examples/hello`      | Hyperscript MVP — signals, fonts, input          |
-| `examples/jsx`        | 23 widgets via JSX (esbuild transpile)           |
-| `examples/test`       | Framework unit tests — 54 assertions             |
-| `examples/anim`       | `createAnimation` smoke test                     |
-| `examples/image`      | PNG decoder smoke test                           |
-| `examples/animimg`    | Multi-frame `<animimg>` loop                     |
-| `examples/imagebutton`| Per-state `<imagebutton>` (released/pressed)     |
+| `examples/showcase`   | **The core demo** — all 31 host tags, light/dark themes + runtime tokens, CJK role fonts, image family, on-screen keyboard, chart/menu/msgbox, animation engine. Interactive by default; `STONEGUI_SHOWCASE_SMOKE=1` runs the scripted regression |
+| `examples/jsx`        | JSX + esbuild toolchain — widget showcase via real JSX (transpiled) |
+| `examples/test`       | Framework / theme / layout / input / keyboard — 492 assertions |
 
 ### `examples/jsx` — JSX (React/Vue style)
 
@@ -430,16 +554,19 @@ LVGL 9.x + QuickJS + SDL2 on Linux.
 
 **Implemented:** 30+ widgets (incl. on-screen `keyboard`, `<animimg>` loops
 and `<imagebutton>` per-state PNGs via the new `loadImage` handle system),
-style props with pseudo-states (hover/focus/pressed/disabled), Vue Element
-Plus light+dark theme with runtime `setTheme()` / `setThemeToken()`, reactive
-signals + effects + memos + owner tree, `<Show>` / keyed `<For>`, CJK
-auto-discovery (`setDefaultFont()` zero-arg), `loadFontSizes()`, runtime
+style props with pseudo-states (default/hover/focus/pressed/checked/disabled)
+and per-part `partStyles`, a self-contained (`parent = NULL`) Vue Element Plus
+light+dark theme with typed runtime tokens (`setTheme()` /
+`setThemeToken()`) and `"$token"` live colour references, selector-aware
+resolved-style getters, reactive signals + effects + memos + owner tree,
+`<Show>` / keyed `<For>`, CJK auto-discovery (`setDefaultFont()` zero-arg,
+14/16/20/24 role sizes), `loadFontSizes()`, runtime
 TTF/CJK fonts with IME placement, clipboard API (`clipboard.read/write`),
 Ctrl+A/C/V/X/Home/End shortcuts, full `<input>` props (maxLength /
 acceptedChars / password / align / textSelection / cursorPos), keyboard focus
 group, animation API, PNG/JPG/BMP image decoders, ES module loading,
 FetchContent build, clean SIGINT/SIGTERM/SDL_QUIT shutdown, inotify-driven
-hot reload, CI smoke test, TypeScript declarations.
+hot reload, TypeScript declarations.
 
 **Planned:** Wayland backend, framework adapters (Solid/Preact), atom-interned
 `js_setProperty`, DevTools / signal inspector, remaining LVGL widgets

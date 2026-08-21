@@ -194,18 +194,56 @@ class VNode {
 
 /* ── Renderer ───────────────────────────────────────────────────────────── */
 
-function bindProp(native, key, value, state) {
+const [themeVersion, setThemeVersion] = createSignal(0);
+const COLOR_STYLE_PROPERTIES = new Set(["backgroundColor", "borderColor", "textColor"]);
+
+function resolveStyleValue(key, value) {
+    if (!COLOR_STYLE_PROPERTIES.has(key) || typeof value !== "string" || !value.startsWith("$")) {
+        return value;
+    }
+    themeVersion();
+    return lv.getThemeToken(value.slice(1));
+}
+
+function bindProp(native, key, value, selector) {
     if (typeof value === "function") {
-        createEffect(() => lv.setProperty(native, key, value(), state));
+        createEffect(() => lv.setProperty(native, key, resolveStyleValue(key, value()), selector));
+    } else if (COLOR_STYLE_PROPERTIES.has(key) && typeof value === "string" && value.startsWith("$")) {
+        lv.getThemeToken(value.slice(1));
+        createEffect(() => lv.setProperty(native, key, resolveStyleValue(key, value), selector));
     } else {
-        lv.setProperty(native, key, value, state);
+        lv.setProperty(native, key, value, selector);
     }
 }
 
 /* Pseudo-state keys recognised inside a `style` object — they nest another
  * style object whose entries are applied with the matching LVGL state
  * selector. Mirrors the C-side dispatch in js_setProperty. */
-const PSEUDO_STATES = new Set(["hover", "focus", "pressed", "disabled"]);
+const PSEUDO_STATES = new Set(["default", "hover", "focus", "pressed", "checked", "disabled"]);
+
+function applyStyleObject(native, style, selector) {
+    for (const [key, value] of Object.entries(style)) {
+        if (PSEUDO_STATES.has(key)) {
+            if (!value || typeof value !== "object") {
+                throw new TypeError(`style: state '${key}' must contain a style object`);
+            }
+            for (const [stateKey, stateValue] of Object.entries(value)) {
+                if (stateValue && typeof stateValue === "object") {
+                    throw new TypeError(`style: nested value '${stateKey}' is not supported`);
+                }
+                bindProp(native, stateKey, stateValue, {
+                    part: selector?.part ?? "main",
+                    state: key,
+                });
+            }
+        } else {
+            if (value && typeof value === "object") {
+                throw new TypeError(`style: unknown state '${key}'`);
+            }
+            bindProp(native, key, value, selector);
+        }
+    }
+}
 
 function applyProp(native, key, value) {
     if (key === "children") return;
@@ -218,12 +256,21 @@ function applyProp(native, key, value) {
     if (key === "style") {
         if (value) {
             for (const [sk, sv] of Object.entries(value)) {
-                if (PSEUDO_STATES.has(sk) && sv && typeof sv === "object") {
-                    for (const [innerK, innerV] of Object.entries(sv)) {
-                        bindProp(native, innerK, innerV, sk);
+                if (sk === "partStyles") {
+                    if (!sv || typeof sv !== "object") {
+                        throw new TypeError("style.partStyles must be an object");
+                    }
+                    for (const [part, partStyle] of Object.entries(sv)) {
+                        if (!STYLE_PARTS.has(part)) {
+                            throw new TypeError(`style.partStyles: unknown part '${part}'`);
+                        }
+                        if (!partStyle || typeof partStyle !== "object") {
+                            throw new TypeError(`style.partStyles.${part} must be a style object`);
+                        }
+                        applyStyleObject(native, partStyle, { part, state: "default" });
                     }
                 } else {
-                    bindProp(native, sk, sv);
+                    applyStyleObject(native, { [sk]: sv });
                 }
             }
         }
@@ -491,6 +538,14 @@ export function loadImage(path) {
     return lv.loadImage(path);
 }
 
+export function moduleDir(importMetaUrl) {
+    const path = importMetaUrl.startsWith("file://")
+        ? importMetaUrl.slice("file://".length)
+        : importMetaUrl;
+    const cut = path.lastIndexOf("/");
+    return cut > 0 ? path.slice(0, cut) : ".";
+}
+
 export function loadImages(paths) {
     return lv.loadImages(paths);
 }
@@ -502,17 +557,54 @@ export function findCjkFont() {
 export function setDefaultFont(handle) {
     if (!handle) {
         const p = lv.findCjkFontPath();
-        if (p) handle = lv.loadFont(p, 18);
+        if (p) handle = loadFontSizes(p, [14, 16, 20, 24]);
     }
     if (handle) lv.setDefaultFont(handle);
 }
 
-export function getProperty(node, key) {
-    return lv.getProperty(node, key);
+const GET_PROPERTY_KEYS = new Set([
+    "checked", "text", "cursorPos", "target", "scrollable", "visible",
+    "width", "height", "x", "y", "value", "backgroundColor", "textColor",
+    "borderColor", "borderWidth", "outlineColor", "outlineWidth", "radius", "padding", "shadowWidth",
+    "shadowOpa", "bgOpa", "imageOpa", "textOpa", "borderOpa", "lineColor", "lineWidth",
+    "arcColor", "arcWidth", "fontLineHeight",
+]);
+const STYLE_PARTS = new Set([
+    "main", "scrollbar", "indicator", "knob", "selected", "items", "cursor", "placeholder",
+]);
+const STYLE_STATES = new Set([
+    "default", "hover", "focus", "pressed", "checked", "disabled",
+    "focusKey", "edited", "scrolled",
+]);
+
+export function getProperty(node, key, selector) {
+    if (!GET_PROPERTY_KEYS.has(key)) {
+        throw new TypeError(`getProperty: unknown key '${key}'`);
+    }
+    if (selector !== undefined && (selector === null || typeof selector !== "object")) {
+        throw new TypeError("getProperty: selector must be an object");
+    }
+    const part = selector?.part ?? "main";
+    const state = selector?.state ?? "default";
+    if (!STYLE_PARTS.has(part)) {
+        throw new TypeError(`getProperty: unknown part '${part}'`);
+    }
+    if (!STYLE_STATES.has(state)) {
+        throw new TypeError(`getProperty: unknown state '${state}'`);
+    }
+    return lv.getProperty(node, key, { part, state });
+}
+
+export function updateLayout(node) {
+    return lv.updateLayout(node);
 }
 
 export function chartAddSeries(chart, color) {
     return lv.chartAddSeries(chart, color);
+}
+
+export function chartSetSeriesColor(chart, series, color) {
+    return lv.chartSetSeriesColor(chart, series, color);
 }
 
 export function chartSetData(chart, series, data) {
@@ -536,12 +628,24 @@ export const clipboard = {
     write(text)  { return lv.clipboardWrite(text); },
 };
 
-export function setTheme(scheme) {
-    return lv.setTheme(scheme);
+export function focus(node) {
+    return lv.focus(node);
 }
 
-export function setThemeToken(name, color) {
-    return lv.setThemeToken(name, color);
+export function sendKey(key, ctrl = false) {
+    return lv.sendKey(key, ctrl);
+}
+
+export function setTheme(scheme) {
+    const result = lv.setTheme(scheme);
+    setThemeVersion((version) => version + 1);
+    return result;
+}
+
+export function setThemeToken(name, value) {
+    const result = lv.setThemeToken(name, value);
+    setThemeVersion((version) => version + 1);
+    return result;
 }
 
 /* ── Mount ──────────────────────────────────────────────────────────────── */

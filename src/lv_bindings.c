@@ -164,18 +164,24 @@ static lv_color_t parse_color(const char *s) {
     return parse_color_ex(s).color;
 }
 
-/* size value: number → px; string "NN%" → lv_pct(NN); "fill"/"100%" → 100% */
+/* size value: number → px; "NN%" → lv_pct(NN); "fill" → 100%; "auto" → hug
+ * content. An unrecognised string warns and falls back to "auto" — returning 0
+ * silently collapsed the widget, which reads as "my element vanished". */
 static int32_t parse_size(JSContext *ctx, JSValueConst v) {
     if (JS_IsString(v)) {
         const char *s = JS_ToCString(ctx, v);
-        int32_t out = 0;
+        int32_t out = LV_SIZE_CONTENT;
         if (s) {
+            int n = 0;
             if (strcmp(s, "fill") == 0) {
                 out = lv_pct(100);
+            } else if (strcmp(s, "auto") == 0) {
+                out = LV_SIZE_CONTENT;
+            } else if (sscanf(s, "%d", &n) == 1) {
+                out = (strchr(s, '%') != NULL) ? lv_pct(n) : n;
             } else {
-                int n = 0;
-                if (sscanf(s, "%d", &n) == 1)
-                    out = (strchr(s, '%') != NULL) ? lv_pct(n) : n;
+                fprintf(stderr, "stonegui: bad size '%s' (want a number, "
+                                "\"NN%%\", \"fill\" or \"auto\"); using auto\n", s);
             }
         }
         JS_FreeCString(ctx, s);
@@ -427,8 +433,12 @@ static void make_clean_container(lv_obj_t *obj) {
 
 /* ── module functions ───────────────────────────────────────────────────── */
 
-/* Fixed spinner arc length (degrees); only the spin period is configurable. */
-#define SG_SPINNER_ARC_ANGLE 360
+/* Spinner defaults. The arc length must stay BELOW 360: lv_spinner animates
+ * the start angle 0→360 and the end angle `angle`→360+angle in lockstep, so a
+ * 360° arc is a closed ring whose rotation is invisible. Both are overridable
+ * per instance (`arcAngle` at create time, `spinTime` any time). */
+#define SG_SPINNER_ARC_ANGLE 270
+#define SG_SPINNER_TIME_MS   1000
 
 static JSValue js_getScreen(JSContext *ctx, JSValueConst this_val,
                              int argc, JSValueConst *argv) {
@@ -438,6 +448,38 @@ static JSValue js_getScreen(JSContext *ctx, JSValueConst this_val,
     lv_obj_set_style_pad_all(scr, 0, 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     return obj_to_js(ctx, scr);
+}
+
+/* getParent(node) / getChild(node, index) — read-only tree introspection,
+ * null when absent. Composite widgets (msgbox) build sub-objects LVGL never
+ * hands back, so this is the only way to reach a backdrop / header / footer. */
+static JSValue js_getParent(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    lv_obj_t *parent = lv_obj_get_parent(js_to_obj(ctx, argv[0]));
+    return parent ? obj_to_js(ctx, parent) : JS_NULL;
+}
+
+static JSValue js_getChild(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    int32_t index = 0;
+    JS_ToInt32(ctx, &index, argv[1]);
+    lv_obj_t *child = lv_obj_get_child(js_to_obj(ctx, argv[0]), index);
+    return child ? obj_to_js(ctx, child) : JS_NULL;
+}
+
+static JSValue js_createThemeCoverageMenuInternals(JSContext *ctx, JSValueConst this_val,
+                                                    int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    lv_obj_t *page = js_to_obj(ctx, argv[0]);
+    lv_obj_t *section = lv_menu_section_create(page);
+    lv_menu_separator_create(page);
+    lv_menu_cont_create(section);
+    return obj_to_js(ctx, section);
 }
 
 static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
@@ -487,7 +529,11 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
             if (JS_IsNumber(jaa)) JS_ToInt32(ctx, &arc_angle, jaa);
             JS_FreeValue(ctx, jaa);
         }
-        lv_spinner_set_anim_params(obj, 10000, (uint32_t)arc_angle);
+        lv_spinner_set_anim_params(obj, SG_SPINNER_TIME_MS, (uint32_t)arc_angle);
+        /* LVGL exposes no getter for the arc length, and set_anim_params takes
+         * period and length together — stash the length so the `spinTime`
+         * setter can change one without silently resetting the other. */
+        lv_obj_set_user_data(obj, (void *)(uintptr_t)arc_angle);
     }
     else if (strcmp(type, "Checkbox") == 0) {
         obj = lv_checkbox_create(parent);
@@ -601,7 +647,49 @@ static JSValue js_dispose(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* setProperty(node, key, value) */
+/* updateLayout(node) — flush pending layout so the geometry getters
+ * ("width"/"height"/"x"/"y"/"visible") read final coordinates. LVGL only
+ * recomputes positions during lv_timer_handler, so anything that measures
+ * right after mount would otherwise see every object still at 0,0. */
+static JSValue js_updateLayout(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    lv_obj_update_layout(js_to_obj(ctx, argv[0]));
+    return JS_UNDEFINED;
+}
+
+static int32_t parse_pseudo_state(const char *state) {
+    if (strcmp(state, "default") == 0)  return LV_STATE_DEFAULT;
+    if (strcmp(state, "hover") == 0)    return LV_STATE_HOVERED;
+    if (strcmp(state, "focus") == 0)    return LV_STATE_FOCUSED;
+    if (strcmp(state, "pressed") == 0)  return LV_STATE_PRESSED;
+    if (strcmp(state, "checked") == 0)  return LV_STATE_CHECKED;
+    if (strcmp(state, "disabled") == 0) return LV_STATE_DISABLED;
+    return -1;
+}
+
+static int32_t parse_resolved_state(const char *state) {
+    int32_t parsed = parse_pseudo_state(state);
+    if (parsed >= 0) return parsed;
+    if (strcmp(state, "focusKey") == 0) return LV_STATE_FOCUS_KEY;
+    if (strcmp(state, "edited") == 0)   return LV_STATE_EDITED;
+    if (strcmp(state, "scrolled") == 0) return LV_STATE_SCROLLED;
+    return -1;
+}
+
+static int32_t parse_part(const char *part) {
+    if (strcmp(part, "main") == 0)        return LV_PART_MAIN;
+    if (strcmp(part, "scrollbar") == 0)   return LV_PART_SCROLLBAR;
+    if (strcmp(part, "indicator") == 0)   return LV_PART_INDICATOR;
+    if (strcmp(part, "knob") == 0)        return LV_PART_KNOB;
+    if (strcmp(part, "selected") == 0)    return LV_PART_SELECTED;
+    if (strcmp(part, "items") == 0)       return LV_PART_ITEMS;
+    if (strcmp(part, "cursor") == 0)      return LV_PART_CURSOR;
+    if (strcmp(part, "placeholder") == 0) return LV_PART_TEXTAREA_PLACEHOLDER;
+    return -1;
+}
+
 static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
     (void)this_val;
@@ -611,21 +699,54 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
     const char *key = JS_ToCString(ctx, argv[1]);
     if (!key) return JS_EXCEPTION;
 
-    /* Optional 4th argument is a pseudo-state string ("hover" | "focus" |
-     * "pressed" | "disabled"); without it, the selector is LV_STATE_DEFAULT
-     * (0) and styles apply to the widget's normal state. Used by JS like
-     *   lv.setProperty(node, "backgroundColor", "#222", "hover")
-     * to drive `style={{ hover: {backgroundColor: "#222"} }}`. */
-    lv_style_selector_t selector = 0;
+    lv_style_selector_t selector = LV_PART_MAIN | LV_STATE_DEFAULT;
+    int32_t part = LV_PART_MAIN;
+    int32_t state = LV_STATE_DEFAULT;
     if (argc >= 4 && JS_IsString(argv[3])) {
-        const char *s = JS_ToCString(ctx, argv[3]);
-        if (s) {
-            if      (strcmp(s, "hover")    == 0) selector = LV_STATE_HOVERED;
-            else if (strcmp(s, "focus")    == 0) selector = LV_STATE_FOCUSED;
-            else if (strcmp(s, "pressed")  == 0) selector = LV_STATE_PRESSED;
-            else if (strcmp(s, "disabled") == 0) selector = LV_STATE_DISABLED;
-            JS_FreeCString(ctx, s);
+        const char *state_string = JS_ToCString(ctx, argv[3]);
+        if (!state_string) {
+            JS_FreeCString(ctx, key);
+            return JS_EXCEPTION;
         }
+        state = parse_pseudo_state(state_string);
+        JS_FreeCString(ctx, state_string);
+        if (state < 0) {
+            JS_FreeCString(ctx, key);
+            return JS_ThrowTypeError(ctx, "setProperty: unknown state");
+        }
+    } else if (argc >= 4 && JS_IsObject(argv[3])) {
+        JSValue part_value = JS_GetPropertyStr(ctx, argv[3], "part");
+        JSValue state_value = JS_GetPropertyStr(ctx, argv[3], "state");
+        if (JS_IsString(part_value)) {
+            const char *part_string = JS_ToCString(ctx, part_value);
+            if (part_string) {
+                part = parse_part(part_string);
+                JS_FreeCString(ctx, part_string);
+            }
+        }
+        if (JS_IsString(state_value)) {
+            const char *state_string = JS_ToCString(ctx, state_value);
+            if (state_string) {
+                state = parse_pseudo_state(state_string);
+                JS_FreeCString(ctx, state_string);
+            }
+        }
+        JS_FreeValue(ctx, part_value);
+        JS_FreeValue(ctx, state_value);
+        if (part < 0 || state < 0) {
+            JS_FreeCString(ctx, key);
+            return JS_ThrowTypeError(ctx, part < 0
+                ? "setProperty: unknown part" : "setProperty: unknown state");
+        }
+    } else if (argc >= 4 && !JS_IsUndefined(argv[3])) {
+        JS_FreeCString(ctx, key);
+        return JS_ThrowTypeError(ctx, "setProperty: selector must be a state string or object");
+    }
+    selector = (lv_style_selector_t)(part | state);
+    if ((part == LV_PART_SELECTED || part == LV_PART_SCROLLBAR) &&
+        lv_obj_check_type(obj, &lv_dropdown_class)) {
+        lv_obj_t *list = lv_dropdown_get_list(obj);
+        if (list) obj = list;
     }
 
     /* ── layout / size ── */
@@ -721,6 +842,8 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
             if (lbl) lv_label_set_text(lbl, v ? v : "");
         } else if (cls == &lv_checkbox_class) {
             lv_checkbox_set_text(obj, v ? v : "");
+        } else if (cls == &lv_textarea_class) {
+            lv_textarea_set_text(obj, v ? v : "");
         }
         JS_FreeCString(ctx, v);
     } else if (strcmp(key, "textColor") == 0) {
@@ -742,10 +865,20 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         int64_t h; JS_ToInt64(ctx, &h, argv[2]);
         if (h) lv_obj_set_style_text_font(obj, (const lv_font_t *)(uintptr_t)h, selector);
     } else if (strcmp(key, "scrollable") == 0) {
-        if (JS_ToBool(ctx, argv[2]))
+        if (JS_ToBool(ctx, argv[2])) {
             lv_obj_add_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
-        else
+            /* Scrolling is meaningless without clipping. make_clean_container
+             * gives every View OVERFLOW_VISIBLE (so slider/arc knobs at the
+             * track ends survive); on a scroll container that flag widens the
+             * child clip AND the hit-test box by ext_draw_size, leaving rows
+             * scrolled out of view painted over — and clickable through —
+             * whatever sits beside the container. */
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        } else {
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+            if (lv_obj_get_class(obj) == &lv_obj_class)
+                lv_obj_add_flag(obj, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        }
     }
     /* ── Image / AnimImg src ── */
     else if (strcmp(key, "src") == 0) {
@@ -884,14 +1017,16 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
         if (lv_obj_get_class(obj) == &lv_textarea_class)
             lv_textarea_set_cursor_pos(obj, (int32_t)v);
     }
-    /* ── Spinner: spinTime (ms per revolution). Arc length is a fixed
-     * default; lv_spinner_set_anim_params() takes both at once. */
+    /* ── Spinner: spinTime (ms per revolution). The arc length rides along in
+     * user_data because lv_spinner_set_anim_params() takes both at once. */
     else if (strcmp(key, "spinTime") == 0) {
         const lv_obj_class_t *cls = lv_obj_get_class(obj);
         if (cls == &lv_spinner_class) {
             int32_t v; JS_ToInt32(ctx, &v, argv[2]);
-            if (v <= 0) v = 1000;
-            lv_spinner_set_anim_params(obj, (uint32_t)v, SG_SPINNER_ARC_ANGLE);
+            if (v <= 0) v = SG_SPINNER_TIME_MS;
+            uint32_t angle = (uint32_t)(uintptr_t)lv_obj_get_user_data(obj);
+            lv_spinner_set_anim_params(obj, (uint32_t)v,
+                                       angle ? angle : SG_SPINNER_ARC_ANGLE);
         }
     }
     /* ── Spinbox ── */
@@ -1266,11 +1401,21 @@ static JSValue js_setProperty(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
-/* getProperty(node, key) — read back common widget state.
+static JSValue style_color_to_js(JSContext *ctx, lv_color_t color) {
+    char hex[8];
+    snprintf(hex, sizeof(hex), "#%02x%02x%02x", color.red, color.green, color.blue);
+    return JS_NewString(ctx, hex);
+}
+
+/* getProperty(node, key, selector?) — read back common widget state.
  *   "value"   → number (slider/bar/arc) or selected index (dropdown/roller),
  *               or bool (switch/checkbox), or string (input)
  *   "checked" → bool   (switch/checkbox)
  *   "text"    → string (input/label)
+ *   "cursorPos" → number (input)
+ *   "target"  → node handle of the textarea a Keyboard is attached to
+ * Resolved style keys use selector.part | selector.state. Padding represents
+ * the resolved top side (lv_obj_get_style_pad_top).
  */
 static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
                                int argc, JSValueConst *argv) {
@@ -1280,6 +1425,42 @@ static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
     lv_obj_t   *obj = js_to_obj(ctx, argv[0]);
     const char *key = JS_ToCString(ctx, argv[1]);
     if (!key) return JS_EXCEPTION;
+
+    lv_style_selector_t selector = LV_PART_MAIN | LV_STATE_DEFAULT;
+    if (argc >= 3 && JS_IsObject(argv[2])) {
+        int32_t part = LV_PART_MAIN;
+        int32_t state = LV_STATE_DEFAULT;
+        JSValue part_value = JS_GetPropertyStr(ctx, argv[2], "part");
+        JSValue state_value = JS_GetPropertyStr(ctx, argv[2], "state");
+        if (JS_IsString(part_value)) {
+            const char *part_string = JS_ToCString(ctx, part_value);
+            if (part_string) {
+                part = parse_part(part_string);
+                JS_FreeCString(ctx, part_string);
+            }
+        }
+        if (JS_IsString(state_value)) {
+            const char *state_string = JS_ToCString(ctx, state_value);
+            if (state_string) {
+                state = parse_resolved_state(state_string);
+                JS_FreeCString(ctx, state_string);
+            }
+        }
+        JS_FreeValue(ctx, part_value);
+        JS_FreeValue(ctx, state_value);
+        selector = (lv_style_selector_t)(part | state);
+
+        /* LVGL renders a dropdown's SELECTED row and its popup SCROLLBAR on a
+         * separate lv_dropdownlist object (lv_dropdown.c draw_box/draw_box_label
+         * read them from `dropdown->list`), never on the dropdown itself. Those
+         * two parts are therefore meaningless on the dropdown, so resolve them
+         * where they are actually drawn. */
+        if ((part == LV_PART_SELECTED || part == LV_PART_SCROLLBAR) &&
+            lv_obj_check_type(obj, &lv_dropdown_class)) {
+            lv_obj_t *list = lv_dropdown_get_list(obj);
+            if (list) obj = list;
+        }
+    }
 
     JSValue out;
     if (strcmp(key, "checked") == 0) {
@@ -1298,9 +1479,67 @@ static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
             out = JS_NewUint32(ctx, lv_textarea_get_cursor_pos(obj));
         else
             out = JS_UNDEFINED;
-    } else {
-        /* "value" and anything else → the widget's natural value */
+    } else if (strcmp(key, "target") == 0) {
+        const lv_obj_class_t *cls = lv_obj_get_class(obj);
+        if (cls == &lv_keyboard_class)
+            out = obj_to_js(ctx, lv_keyboard_get_textarea(obj));
+        else
+            out = JS_UNDEFINED;
+    } else if (strcmp(key, "backgroundColor") == 0) {
+        out = style_color_to_js(ctx, lv_obj_get_style_bg_color(obj, selector));
+    } else if (strcmp(key, "textColor") == 0) {
+        out = style_color_to_js(ctx, lv_obj_get_style_text_color(obj, selector));
+    } else if (strcmp(key, "borderColor") == 0) {
+        out = style_color_to_js(ctx, lv_obj_get_style_border_color(obj, selector));
+    } else if (strcmp(key, "outlineColor") == 0) {
+        out = style_color_to_js(ctx, lv_obj_get_style_outline_color(obj, selector));
+    } else if (strcmp(key, "lineColor") == 0) {
+        out = style_color_to_js(ctx, lv_obj_get_style_line_color(obj, selector));
+    } else if (strcmp(key, "arcColor") == 0) {
+        out = style_color_to_js(ctx, lv_obj_get_style_arc_color(obj, selector));
+    } else if (strcmp(key, "borderWidth") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_border_width(obj, selector));
+    } else if (strcmp(key, "outlineWidth") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_outline_width(obj, selector));
+    } else if (strcmp(key, "radius") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_radius(obj, selector));
+    } else if (strcmp(key, "padding") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_pad_top(obj, selector));
+    } else if (strcmp(key, "shadowWidth") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_shadow_width(obj, selector));
+    } else if (strcmp(key, "shadowOpa") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_shadow_opa(obj, selector));
+    } else if (strcmp(key, "bgOpa") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_bg_opa(obj, selector));
+    } else if (strcmp(key, "imageOpa") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_image_opa(obj, selector));
+    } else if (strcmp(key, "textOpa") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_text_opa(obj, selector));
+    } else if (strcmp(key, "borderOpa") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_border_opa(obj, selector));
+    } else if (strcmp(key, "lineWidth") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_line_width(obj, selector));
+    } else if (strcmp(key, "arcWidth") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_style_arc_width(obj, selector));
+    } else if (strcmp(key, "fontLineHeight") == 0) {
+        const lv_font_t *font = lv_obj_get_style_text_font(obj, selector);
+        out = JS_NewInt32(ctx, lv_font_get_line_height(font));
+    } else if (strcmp(key, "scrollable") == 0) {
+        out = JS_NewBool(ctx, lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE));
+    } else if (strcmp(key, "visible") == 0) {
+        out = JS_NewBool(ctx, lv_obj_is_visible(obj));
+    } else if (strcmp(key, "width") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_width(obj));
+    } else if (strcmp(key, "height") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_height(obj));
+    } else if (strcmp(key, "x") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_x(obj));
+    } else if (strcmp(key, "y") == 0) {
+        out = JS_NewInt32(ctx, lv_obj_get_y(obj));
+    } else if (strcmp(key, "value") == 0) {
         out = widget_value_to_js(ctx, obj);
+    } else {
+        out = JS_UNDEFINED;
     }
 
     JS_FreeCString(ctx, key);
@@ -1336,11 +1575,79 @@ static JSValue js_addEvent(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+#define SG_FONT_FILE_CAP 32
+#define SG_FONT_HANDLE_CAP 128
+
+typedef struct {
+    char *path;
+    uint8_t *data;
+    size_t len;
+} sg_font_file_t;
+
+typedef struct {
+    const char *path;
+    int32_t size;
+    lv_font_t *font;
+} sg_font_handle_t;
+
+/* Font files and font objects are immortal because Tiny-TTF keeps the source
+ * data by reference. Exact path strings are the cache key; resolving relative
+ * paths or symlink aliases is intentionally outside this catalog's scope. */
+static sg_font_file_t g_font_files[SG_FONT_FILE_CAP];
+static size_t g_font_file_count;
+static sg_font_handle_t g_font_handles[SG_FONT_HANDLE_CAP];
+static size_t g_font_handle_count;
+
+/* Typography roles in doc/theme.md §6.1: base, medium, large, display. */
+static const int32_t g_default_font_sizes[] = { 14, 16, 20, 24 };
+static const lv_font_t *g_default_fonts[4];
+
+static sg_font_file_t *find_font_file(const char *path) {
+    for (size_t i = 0; i < g_font_file_count; i++) {
+        if (strcmp(g_font_files[i].path, path) == 0) return &g_font_files[i];
+    }
+    return NULL;
+}
+
+static lv_font_t *find_font_handle(const char *path, int32_t size) {
+    for (size_t i = 0; i < g_font_handle_count; i++) {
+        sg_font_handle_t *entry = &g_font_handles[i];
+        if (entry->size == size && strcmp(entry->path, path) == 0) return entry->font;
+    }
+    return NULL;
+}
+
+static sg_font_file_t *load_font_file(const char *path) {
+    if (g_font_file_count >= SG_FONT_FILE_CAP) return NULL;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long file_len = ftell(f);
+    if (file_len <= 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+
+    size_t len = (size_t)file_len;
+    uint8_t *data = lv_malloc(len);
+    if (!data || fread(data, 1, len, f) != len) { fclose(f); return NULL; }
+    fclose(f);
+
+    size_t path_len = strlen(path) + 1;
+    char *stored_path = lv_malloc(path_len);
+    if (!stored_path) return NULL;
+    memcpy(stored_path, path, path_len);
+
+    sg_font_file_t *entry = &g_font_files[g_font_file_count++];
+    entry->path = stored_path;
+    entry->data = data;
+    entry->len = len;
+    return entry;
+}
+
 /* loadFont(path, size) → font handle (int), or 0 on failure.
- * Reads the TTF/TTC file fully into memory (kept alive for the font lifetime)
- * and builds a Tiny-TTF font. Supports CJK and arbitrary sizes. */
+ * The first size loaded for a path reads and retains the file bytes; other
+ * sizes share those bytes but keep separate 256-glyph Tiny-TTF caches. */
 static JSValue js_loadFont(JSContext *ctx, JSValueConst this_val,
-                            int argc, JSValueConst *argv) {
+                             int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 2) return JS_EXCEPTION;
 
@@ -1349,36 +1656,42 @@ static JSValue js_loadFont(JSContext *ctx, JSValueConst this_val,
     if (!path) return JS_EXCEPTION;
 
     JSValue result = JS_NewInt64(ctx, 0);
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (len > 0) {
-            /* Intentionally not freed: Tiny-TTF references this buffer. */
-            uint8_t *buf = lv_malloc((size_t)len);
-            if (buf && fread(buf, 1, (size_t)len, f) == (size_t)len) {
-                lv_font_t *font = lv_tiny_ttf_create_data(buf, (size_t)len, size);
-                if (font) {
-                    /* CJK TTF files have no glyphs for LVGL's built-in icon
-                     * symbols (LV_SYMBOL_OK/DOWN/… live in the 0xF000+ private
-                     * use area, supplied only by Montserrat). Fall back to the
-                     * nearest enabled Montserrat so checkbox ticks, dropdown
-                     * arrows, etc. render instead of showing tofu boxes. */
-                    const lv_font_t *fb = &lv_font_montserrat_14;
-                    if      (size >= 24) fb = &lv_font_montserrat_24;
-                    else if (size >= 20) fb = &lv_font_montserrat_20;
-                    else if (size >= 16) fb = &lv_font_montserrat_16;
-                    font->fallback = fb;
-                    result = obj_to_js(ctx, (lv_obj_t *)font);
-                } else {
-                    lv_free(buf);
-                }
-            } else if (buf) {
-                lv_free(buf);
-            }
+    lv_font_t *font = find_font_handle(path, size);
+    if (font) {
+        result = obj_to_js(ctx, (lv_obj_t *)font);
+        JS_FreeCString(ctx, path);
+        return result;
+    }
+
+    if (g_font_handle_count >= SG_FONT_HANDLE_CAP) {
+        JS_FreeCString(ctx, path);
+        return result;
+    }
+
+    sg_font_file_t *file = find_font_file(path);
+    if (!file) file = load_font_file(path);
+    if (file) {
+        font = lv_tiny_ttf_create_data_ex(file->data, file->len, size,
+                                          LV_FONT_KERNING_NORMAL,
+                                          LV_TINY_TTF_CACHE_GLYPH_CNT);
+        if (font) {
+            /* CJK TTF files have no glyphs for LVGL's built-in icon
+             * symbols (LV_SYMBOL_OK/DOWN/… live in the 0xF000+ private
+             * use area, supplied only by Montserrat). Fall back to the
+             * nearest enabled Montserrat so checkbox ticks, dropdown
+             * arrows, etc. render instead of showing tofu boxes. */
+            const lv_font_t *fb = &lv_font_montserrat_14;
+            if      (size >= 24) fb = &lv_font_montserrat_24;
+            else if (size >= 20) fb = &lv_font_montserrat_20;
+            else if (size >= 16) fb = &lv_font_montserrat_16;
+            font->fallback = fb;
+
+            sg_font_handle_t *entry = &g_font_handles[g_font_handle_count++];
+            entry->path = file->path;
+            entry->size = size;
+            entry->font = font;
+            result = obj_to_js(ctx, (lv_obj_t *)font);
         }
-        fclose(f);
     }
     JS_FreeCString(ctx, path);
     return result;
@@ -1446,12 +1759,37 @@ static JSValue js_loadImages(JSContext *ctx, JSValueConst this_val,
     return arr;
 }
 
-/* setDefaultFont(handle) — make a loaded font the global default while keeping
- * stonegui's custom theme. All widgets that don't override `font` inherit it. */
+/* setDefaultFont(handleOrMap) — a number applies one face to every role for
+ * backward compatibility; a map transfers all four role faces to sg_theme. */
 static JSValue js_setDefaultFont(JSContext *ctx, JSValueConst this_val,
-                                  int argc, JSValueConst *argv) {
+                                   int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 1) return JS_EXCEPTION;
+
+    if (JS_IsObject(argv[0])) {
+        bool updated = false;
+        memset(g_default_fonts, 0, sizeof(g_default_fonts));
+        for (size_t i = 0; i < 4; i++) {
+            char key[4];
+            snprintf(key, sizeof(key), "%d", (int)g_default_font_sizes[i]);
+            JSValue value = JS_GetPropertyStr(ctx, argv[0], key);
+            if (JS_IsNumber(value)) {
+                int64_t h = 0;
+                if (JS_ToInt64(ctx, &h, value) == 0 && h) {
+                    g_default_fonts[i] = (const lv_font_t *)(uintptr_t)h;
+                    updated = true;
+                }
+            }
+            JS_FreeValue(ctx, value);
+        }
+        if (!updated) return JS_UNDEFINED;
+
+        sg_theme_set_role_fonts(lv_display_get_default(),
+                                g_default_fonts[0], g_default_fonts[1],
+                                g_default_fonts[2], g_default_fonts[3]);
+        return JS_UNDEFINED;
+    }
+
     int64_t h; JS_ToInt64(ctx, &h, argv[0]);
     if (!h) return JS_UNDEFINED;
 
@@ -1529,6 +1867,27 @@ static JSValue js_chartAddSeries(JSContext *ctx, JSValueConst this_val,
     return JS_NewInt64(ctx, (int64_t)(uintptr_t)ser);
 }
 
+/* chartSetSeriesColor(chart, series, colorString) — repaints an EXISTING
+ * series. lv_chart_add_series copies the colour into the series struct, so a
+ * theme/accent change cannot reach a series created earlier; without this the
+ * chart is the one control that keeps a stale accent after setThemeToken. */
+static JSValue js_chartSetSeriesColor(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_EXCEPTION;
+    lv_obj_t          *chart = js_to_obj(ctx, argv[0]);
+    int64_t            sh;    JS_ToInt64(ctx, &sh, argv[1]);
+    lv_chart_series_t *ser   = (lv_chart_series_t *)(uintptr_t)sh;
+    if (!chart || !ser) return JS_UNDEFINED;
+
+    const char *col = JS_ToCString(ctx, argv[2]);
+    if (col) {
+        lv_chart_set_series_color(chart, ser, parse_color(col));
+        JS_FreeCString(ctx, col);
+    }
+    return JS_UNDEFINED;
+}
+
 /* chartSetData(chart, series, [v0, v1, ...]) — replaces all points; resizes
  * the chart's point count to match the array length. */
 static JSValue js_chartSetData(JSContext *ctx, JSValueConst this_val,
@@ -1596,11 +1955,13 @@ static void msgbox_button_cb(lv_event_t *e) {
 
 static void msgbox_close_cb(lv_event_t *e) {
     msgbox_ctx_t *m = lv_event_get_user_data(e);
-    JSValue arg = JS_NewInt32(m->ctx, -1);
-    JSValue ret = JS_Call(m->ctx, m->on_close, JS_UNDEFINED, 1, &arg);
-    if (JS_IsException(ret)) js_std_dump_error(m->ctx);
-    JS_FreeValue(m->ctx, ret);
-    JS_FreeValue(m->ctx, arg);
+    if (!JS_IsUndefined(m->on_close)) {
+        JSValue arg = JS_NewInt32(m->ctx, -1);
+        JSValue ret = JS_Call(m->ctx, m->on_close, JS_UNDEFINED, 1, &arg);
+        if (JS_IsException(ret)) js_std_dump_error(m->ctx);
+        JS_FreeValue(m->ctx, ret);
+        JS_FreeValue(m->ctx, arg);
+    }
     lv_obj_t *mbox = lv_obj_get_parent(lv_obj_get_parent(lv_event_get_current_target_obj(e)));
     if (mbox && lv_obj_get_class(mbox) == &lv_msgbox_class)
         lv_msgbox_close_async(mbox);
@@ -1629,7 +1990,13 @@ static JSValue js_showMsgbox(JSContext *ctx, JSValueConst this_val,
     lv_obj_t *mbox = lv_msgbox_create(NULL);
     if (title) lv_msgbox_add_title(mbox, title);
     if (text)  lv_msgbox_add_text(mbox, text);
-    lv_obj_t *close_btn = lv_msgbox_add_close_button(mbox);
+    /* NOT lv_msgbox_add_close_button: that helper registers LVGL's own CLICKED
+     * handler first (lv_msgbox.c:228-233), which calls lv_msgbox_close() and
+     * DELETES the msgbox synchronously. The event dispatcher then aborts the
+     * remaining callbacks on the dead object, so the onClose(-1) this module
+     * documents could never fire. Building the same affordance by hand keeps
+     * the close path entirely ours. */
+    lv_obj_t *close_btn = lv_msgbox_add_header_button(mbox, LV_SYMBOL_CLOSE);
 
     msgbox_ctx_t *mctx = lv_malloc(sizeof(*mctx));
     mctx->ctx            = ctx;
@@ -1654,7 +2021,7 @@ static JSValue js_showMsgbox(JSContext *ctx, JSValueConst this_val,
                 lv_obj_add_event_cb(b, msgbox_button_cb, LV_EVENT_CLICKED, mctx);
         }
     }
-    if (!JS_IsUndefined(mctx->on_close) && close_btn)
+    if (close_btn)
         lv_obj_add_event_cb(close_btn, msgbox_close_cb, LV_EVENT_CLICKED, mctx);
     lv_obj_add_event_cb(mbox, msgbox_delete_cb, LV_EVENT_DELETE, mctx);
 
@@ -1683,6 +2050,85 @@ static JSValue js_clipboardWrite(JSContext *ctx, JSValueConst this_val,
     const char *s = JS_ToCString(ctx, argv[0]);
     if (s) { SDL_SetClipboardText(s); JS_FreeCString(ctx, s); }
     return JS_UNDEFINED;
+}
+
+static JSValue js_focus(JSContext *ctx, JSValueConst this_val,
+                        int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    lv_obj_t *obj = js_to_obj(ctx, argv[0]);
+    if (!g_group || !obj) return JS_NewBool(ctx, false);
+    lv_group_focus_obj(obj);
+    return JS_NewBool(ctx, lv_group_get_focused(g_group) == obj);
+}
+
+/* sendKey(name, ctrl) — inject an SDL key press.
+ *
+ * SDL_PushEvent runs every SDL_AddEventWatch callback SYNCHRONOUSLY before
+ * queueing, so `sdl_event_watch` in main.c (where the Ctrl+A/C/V/X and
+ * Home/End handling lives) reacts before this function returns. That watch
+ * reads SDL_GetModState() rather than the event's keysym, hence the
+ * set-modifier / restore dance around the push. */
+/* sendEvent(node, name) → bool. Dispatches a synthetic LVGL event so a scripted
+ * run exercises the SAME handler a real pointer would, instead of reaching past
+ * it. "released" is what toggles a dropdown (lv_dropdown.c btn_release_handler,
+ * which is NULL-indev safe because lv_indev_get_scroll_obj(NULL) returns NULL);
+ * "click" is what the msgbox footer and close buttons listen for. Returns false
+ * for an unmapped name rather than silently doing nothing. */
+static JSValue js_sendEvent(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_EXCEPTION;
+    lv_obj_t   *obj  = js_to_obj(ctx, argv[0]);
+    const char *name = JS_ToCString(ctx, argv[1]);
+    if (!obj || !name) {
+        JS_FreeCString(ctx, name);
+        return JS_NewBool(ctx, false);
+    }
+
+    lv_event_code_t code = LV_EVENT_CLICKED;
+    bool known = true;
+    if      (strcmp(name, "click")    == 0) code = LV_EVENT_CLICKED;
+    else if (strcmp(name, "released") == 0) code = LV_EVENT_RELEASED;
+    else if (strcmp(name, "change")   == 0) code = LV_EVENT_VALUE_CHANGED;
+    else known = false;
+    JS_FreeCString(ctx, name);
+    if (!known) return JS_NewBool(ctx, false);
+
+    lv_obj_send_event(obj, code, NULL);
+    return JS_NewBool(ctx, true);
+}
+
+static JSValue js_sendKey(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+    bool ctrl = (argc > 1) && JS_ToBool(ctx, argv[1]);
+
+    SDL_Keycode key = SDLK_UNKNOWN;
+    if (name[0] >= 'a' && name[0] <= 'z' && name[1] == '\0')
+        key = (SDL_Keycode)name[0];
+    else if (strcmp(name, "home") == 0) key = SDLK_HOME;
+    else if (strcmp(name, "end") == 0)  key = SDLK_END;
+    JS_FreeCString(ctx, name);
+    if (key == SDLK_UNKNOWN) return JS_NewBool(ctx, false);
+
+    SDL_Keymod prev = SDL_GetModState();
+    SDL_SetModState(ctrl ? KMOD_LCTRL : KMOD_NONE);
+
+    SDL_Event e;
+    memset(&e, 0, sizeof(e));
+    e.type             = SDL_KEYDOWN;
+    e.key.state        = SDL_PRESSED;
+    e.key.keysym.sym   = key;
+    e.key.keysym.scancode = SDL_GetScancodeFromKey(key);
+    e.key.keysym.mod   = ctrl ? KMOD_LCTRL : KMOD_NONE;
+    int pushed = SDL_PushEvent(&e);
+
+    SDL_SetModState(prev);
+    return JS_NewBool(ctx, pushed == 1);
 }
 
 static JSValue js_findCjkFontPath(JSContext *ctx, JSValueConst this_val,
@@ -1715,18 +2161,87 @@ static JSValue js_setTheme(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+static JSValue js_getThemeToken(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "getThemeToken requires a name");
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    sg_theme_token_value_t value;
+    sg_theme_token_result_t result = sg_theme_get_token(name, &value);
+    JS_FreeCString(ctx, name);
+    if (result == SG_THEME_TOKEN_UNKNOWN)
+        return JS_ThrowTypeError(ctx, "unknown theme token name");
+    if (value.kind != SG_TOKEN_COLOR)
+        return JS_ThrowTypeError(ctx, "theme token is not a color");
+
+    char hex[8];
+    snprintf(hex, sizeof(hex), "#%02x%02x%02x",
+             value.color.red, value.color.green, value.color.blue);
+    return JS_NewString(ctx, hex);
+}
+
+/* getThemeMetric(name) → number. The integer half of the registry
+ * (radius_*, border_width, space_*, control_height, …). Deliberately a
+ * SEPARATE entry point rather than widening getThemeToken: the colour/integer
+ * split is a contract this project pins with a test, and setThemeToken already
+ * keeps the two kinds apart through overloads. Lets a bundle build layout
+ * primitives from the same tokens the theme paints with instead of re-typing
+ * 4/8/12/16 as literals. */
+static JSValue js_getThemeMetric(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_ThrowTypeError(ctx, "getThemeMetric requires a name");
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_EXCEPTION;
+
+    sg_theme_token_value_t value;
+    sg_theme_token_result_t result = sg_theme_get_token(name, &value);
+    JS_FreeCString(ctx, name);
+    if (result == SG_THEME_TOKEN_UNKNOWN)
+        return JS_ThrowTypeError(ctx, "unknown theme token name");
+    if (value.kind != SG_TOKEN_INT)
+        return JS_ThrowTypeError(ctx, "theme token is not an integer metric");
+
+    return JS_NewInt32(ctx, value.integer);
+}
+
 static JSValue js_setThemeToken(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv) {
     (void)this_val;
-    if (argc < 2) return JS_EXCEPTION;
+    if (argc < 2) return JS_ThrowTypeError(ctx, "setThemeToken requires name and value");
     const char *name = JS_ToCString(ctx, argv[0]);
-    const char *col  = JS_ToCString(ctx, argv[1]);
-    if (name && col) {
-        sg_color_t c = parse_color_ex(col);
-        sg_theme_set_token(lv_display_get_default(), name, c.color);
+    if (!name) return JS_EXCEPTION;
+
+    sg_theme_token_value_t value;
+    if (JS_IsString(argv[1])) {
+        const char *color = JS_ToCString(ctx, argv[1]);
+        if (!color) {
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
+        value.kind = SG_TOKEN_COLOR;
+        value.color = parse_color_ex(color).color;
+        JS_FreeCString(ctx, color);
+    } else if (JS_IsNumber(argv[1])) {
+        value.kind = SG_TOKEN_INT;
+        if (JS_ToInt32(ctx, &value.integer, argv[1]) < 0) {
+            JS_FreeCString(ctx, name);
+            return JS_EXCEPTION;
+        }
+    } else {
+        JS_FreeCString(ctx, name);
+        return JS_ThrowTypeError(ctx, "theme token value must be a color string or number");
     }
+
+    sg_theme_token_result_t result = sg_theme_set_token(
+        lv_display_get_default(), name, value);
     JS_FreeCString(ctx, name);
-    JS_FreeCString(ctx, col);
+    if (result == SG_THEME_TOKEN_UNKNOWN)
+        return JS_ThrowTypeError(ctx, "unknown theme token name");
+    if (result == SG_THEME_TOKEN_WRONG_KIND)
+        return JS_ThrowTypeError(ctx, "theme token value has the wrong kind");
     return JS_UNDEFINED;
 }
 
@@ -1892,11 +2407,15 @@ static JSValue js_createAnimation(JSContext *ctx, JSValueConst this_val,
 
 static const JSCFunctionListEntry lv_funcs[] = {
     JS_CFUNC_DEF("getScreen",      0, js_getScreen),
+    JS_CFUNC_DEF("getParent",      1, js_getParent),
+    JS_CFUNC_DEF("getChild",       2, js_getChild),
+    JS_CFUNC_DEF("createThemeCoverageMenuInternals", 1, js_createThemeCoverageMenuInternals),
     JS_CFUNC_DEF("createNode",     1, js_createNode),
     JS_CFUNC_DEF("appendChild",    2, js_appendChild),
     JS_CFUNC_DEF("removeChild",    2, js_removeChild),
     JS_CFUNC_DEF("setProperty",    3, js_setProperty),
     JS_CFUNC_DEF("getProperty",    2, js_getProperty),
+    JS_CFUNC_DEF("updateLayout",   1, js_updateLayout),
     JS_CFUNC_DEF("addEvent",       3, js_addEvent),
     JS_CFUNC_DEF("dispose",        1, js_dispose),
     JS_CFUNC_DEF("loadFont",       2, js_loadFont),
@@ -1908,14 +2427,20 @@ static const JSCFunctionListEntry lv_funcs[] = {
     JS_CFUNC_DEF("menuAddPage",    2, js_menuAddPage),
     JS_CFUNC_DEF("menuSetPage",    2, js_menuSetPage),
     JS_CFUNC_DEF("chartAddSeries", 2, js_chartAddSeries),
+    JS_CFUNC_DEF("chartSetSeriesColor", 3, js_chartSetSeriesColor),
     JS_CFUNC_DEF("chartSetData",   3, js_chartSetData),
     JS_CFUNC_DEF("showMsgbox",     2, js_showMsgbox),
     JS_CFUNC_DEF("createAnimation",2, js_createAnimation),
     JS_CFUNC_DEF("findCjkFontPath",0, js_findCjkFontPath),
     JS_CFUNC_DEF("setTheme",       1, js_setTheme),
+    JS_CFUNC_DEF("getThemeToken",  1, js_getThemeToken),
+    JS_CFUNC_DEF("getThemeMetric", 1, js_getThemeMetric),
     JS_CFUNC_DEF("setThemeToken",  2, js_setThemeToken),
     JS_CFUNC_DEF("clipboardRead",  0, js_clipboardRead),
     JS_CFUNC_DEF("clipboardWrite", 1, js_clipboardWrite),
+    JS_CFUNC_DEF("focus",          1, js_focus),
+    JS_CFUNC_DEF("sendKey",        2, js_sendKey),
+    JS_CFUNC_DEF("sendEvent",      2, js_sendEvent),
 };
 
 static int lv_module_init(JSContext *ctx, JSModuleDef *m) {
