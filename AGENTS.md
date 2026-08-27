@@ -24,7 +24,7 @@ examples/showcase         *the* core demo — all 31 host tags, light/dark
                           regression (prints SHOWCASE SMOKE PASSED, exit 0).
                           Image assets live in examples/showcase/assets/
 examples/jsx              JSX demo — must be transpiled with esbuild
-examples/test             framework + theme/layout/input/keyboard (492 assertions)
+examples/test             framework + theme/layout/input/keyboard (534 assertions)
 doc/prompts.md            ORIGINAL DESIGN DOC, ARCHIVED with banner
 CMakeLists.txt            pins LVGL v9.2.2 + QuickJS commit 4c722ce
                           (VERSION 2025-09-13) via FetchContent →
@@ -225,14 +225,10 @@ background/text/border/outline/line/arc colour, the matching widths and
 opacities, `radius`, `padding` (resolved `pad_top`), `shadowWidth`,
 `shadowOpa`, `bgOpa`, `imageOpa` and `fontLineHeight`. An unknown key, part or
 state throws a `TypeError` — it must never fall through to the widget `value`
-or return black. **That guard lives in `framework.js`**, whose `getProperty`
-wrapper checks `GET_PROPERTY_KEYS` / `STYLE_PARTS` / `STYLE_STATES` before it
-calls the native module. Raw `lv.getProperty` in `lv_bindings.c` does NOT
-throw: an unknown key returns `undefined`, and `parse_part` /
-`parse_resolved_state` return `-1` for an unknown name, which ORs into an
-unspecified selector rather than an error. Always go through the wrapper. The
-vocabulary is mirrored a third time by `StylePart` / `ResolvedState` /
-`GetPropertyResults` in `framework.d.ts`.
+or return black. Both the `framework.js` wrapper and raw `lv.getProperty` in
+`lv_bindings.c` enforce that contract, so native callers cannot bypass the
+selector validation. The vocabulary is mirrored by `StylePart` /
+`ResolvedState` / `GetPropertyResults` in `framework.d.ts`.
 
 Dropdowns are the one special case: LVGL draws the `selected` row and the
 popup `scrollbar` on a separate `lv_dropdownlist` object, so `js_getProperty`

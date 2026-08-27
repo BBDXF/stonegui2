@@ -422,6 +422,22 @@ static bool                       g_dark   = false;
 SG_STYLE_LIST(X)
 #undef X
 
+/* Two `static lv_style_t name;` at file scope are a legal C tentative
+ * definition of ONE object, so a duplicated X(name) would silently shrink the
+ * registry with a green build. Expanding the same list into an enum makes that
+ * duplicate a redeclared enumerator — a hard compile error — and the
+ * _Static_assert stops the two expansions from drifting apart. */
+#define X(name) SG_STYLE_IDX_##name,
+enum { SG_STYLE_LIST(X) SG_STYLE_COUNT };
+#undef X
+
+#define X(name) &name,
+static lv_style_t *const g_style_table[] = { SG_STYLE_LIST(X) };
+#undef X
+
+_Static_assert(sizeof(g_style_table) / sizeof(g_style_table[0]) == SG_STYLE_COUNT,
+               "SG_STYLE_LIST: style pointer table and index enum disagree");
+
 static void styles_init_media(const sg_theme_tokens_t *t);
 static void styles_init_controls(const sg_theme_tokens_t *t);
 static void styles_init_composites(const sg_theme_tokens_t *t);
@@ -437,9 +453,7 @@ static void styles_init_composites(const sg_theme_tokens_t *t);
  * `sg_theme_set_scheme` / `sg_theme_set_token` silent no-ops. */
 static void styles_init(const sg_theme_tokens_t *t) {
     if (g_styles_inited) {
-#define X(name) lv_style_reset(&name);
-        SG_STYLE_LIST(X)
-#undef X
+        for (size_t i = 0; i < SG_STYLE_COUNT; i++) lv_style_reset(g_style_table[i]);
     }
 
     g_styles_inited = true;
@@ -1300,29 +1314,8 @@ static void sg_add_scrollbar(lv_obj_t *obj) {
                      LV_PART_SCROLLBAR | LV_STATE_SCROLLED);
 }
 
-static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
-    (void)th;
-
-    /* Screens (no parent) get the scaffold background + default text colour. */
-    if (lv_obj_get_parent(obj) == NULL) {
-        lv_obj_add_style(obj, &st_screen, 0);
-        sg_add_scrollbar(obj);
-        return;
-    }
-
-    const lv_obj_class_t *cls = lv_obj_get_class(obj);
-
-    /* on_surface text for every widget EXCEPT labels — both halves of this
-     * condition have regressed before, in opposite directions:
-     *   - drop the style   → the default theme's own `color_text` (via
-     *     `styles.card`, and on list/table/calendar/menu/chart) survives a
-     *     scheme swap and goes invisible in dark mode;
-     *   - apply it to labels → a Button's caption IS a child label, and a
-     *     style on the label beats the on_primary it inherits from the
-     *     button, painting captions grey over the primary fill.
-     * Labels must inherit; their ancestor is what carries the colour. */
-    if (cls != &lv_label_class) lv_obj_add_style(obj, &st_text, 0);
-
+static void styles_apply_text_containers(lv_obj_t *obj,
+                                         const lv_obj_class_t *cls) {
     /* Row 1. Exact-class match, so composite sub-objects that merely descend
      * from lv_obj (dropdown popup list, menu conts, …) keep their own branch.
      * The tabview's three anonymous lv_obj parts and the calendar's own
@@ -1399,7 +1392,11 @@ static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
         lv_obj_add_style(obj, &st_disabled_surface, LV_STATE_DISABLED);
         lv_obj_add_style(obj, &st_spinbox_cursor, LV_PART_CURSOR);
     }
-    else if (cls == &lv_switch_class) {
+}
+
+static void styles_apply_controls(lv_obj_t *obj,
+                                  const lv_obj_class_t *cls) {
+    if (cls == &lv_switch_class) {
         lv_obj_add_style(obj, &st_sw_bg, 0);
         lv_obj_add_style(obj, &st_sw_indic, LV_PART_INDICATOR);
         lv_obj_add_style(obj, &st_sw_bg_on,
@@ -1497,7 +1494,11 @@ static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
         lv_obj_add_style(obj, &st_roller_sel_checked,
                          LV_PART_SELECTED | LV_STATE_CHECKED);
     }
-    else if (cls == &lv_tabview_class) {
+}
+
+static void styles_apply_data_navigation(lv_obj_t *obj,
+                                         const lv_obj_class_t *cls) {
+    if (cls == &lv_tabview_class) {
         lv_obj_add_style(obj, &st_tabview_main, 0);
     }
     else if (cls == &lv_list_class) {
@@ -1645,7 +1646,11 @@ static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
     else if (cls == &lv_spangroup_class) {
         lv_obj_add_style(obj, &st_span, 0);
     }
-    else if (cls == &lv_led_class) {
+}
+
+static void styles_apply_composites_overlays(lv_obj_t *obj,
+                                             const lv_obj_class_t *cls) {
+    if (cls == &lv_led_class) {
         lv_obj_add_style(obj, &st_led, 0);
     }
     else if (cls == &lv_image_class) {
@@ -1716,6 +1721,36 @@ static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
         lv_obj_add_style(obj, &st_msgbox_close_btn_hover, LV_STATE_HOVERED);
         lv_obj_add_style(obj, &st_msgbox_close_btn_pressed, LV_STATE_PRESSED);
     }
+}
+
+static void sg_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj) {
+    (void)th;
+
+    /* Screens (no parent) get the scaffold background + default text colour. */
+    if (lv_obj_get_parent(obj) == NULL) {
+        lv_obj_add_style(obj, &st_screen, 0);
+        sg_add_scrollbar(obj);
+        return;
+    }
+
+    const lv_obj_class_t *cls = lv_obj_get_class(obj);
+
+    /* on_surface text for every widget EXCEPT labels — both halves of this
+     * condition have regressed before, in opposite directions:
+     *   - drop the style   → the default theme's own `color_text` (via
+     *     `styles.card`, and on list/table/calendar/menu/chart) survives a
+     *     scheme swap and goes invisible in dark mode;
+     *   - apply it to labels → a Button's caption IS a child label, and a
+     *     style on the label beats the on_primary it inherits from the
+     *     button, painting captions grey over the primary fill.
+     * Labels must inherit; their ancestor is what carries the colour. */
+    if (cls != &lv_label_class) lv_obj_add_style(obj, &st_text, 0);
+
+    styles_apply_text_containers(obj, cls);
+    styles_apply_controls(obj, cls);
+    styles_apply_data_navigation(obj, cls);
+    styles_apply_composites_overlays(obj, cls);
+
     /* Labels/Text intentionally have no style here: they inherit text_color
      * from their nearest ancestor (screen → dark, Button → white). */
 }

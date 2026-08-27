@@ -22,10 +22,8 @@ declare module "lvgl" {
         value: unknown,
         selector?: PseudoState | StyleSelector,
     ): void;
-    /** Raw, UNVALIDATED getter. Reads `selector.part` / `selector.state` if
-     *  present but does not reject bad ones, and returns `undefined` for a key
-     *  it does not know. Use the framework `getProperty` wrapper to get the
-     *  `TypeError`s. */
+    /** Raw getter. Throws `TypeError` for an unknown key or for an unknown or
+     *  wrong-typed `selector.part` / `selector.state`. */
     export function getProperty(node: number, key: string, selector?: {
         part?: string;
         state?: string;
@@ -170,10 +168,9 @@ export interface GetPropertyResults {
 }
 export type GetPropertyKey = keyof GetPropertyResults;
 /** Resolved-style selector. Every listed part and state is accepted by the
- *  native parser (`parse_part` / `parse_resolved_state`). Anything else is
- *  rejected by the `framework.js` wrappers with a `TypeError` — the raw
- *  `lvgl` module does not validate, it falls back to an unspecified
- *  selector. */
+ *  native parser (`parse_part` / `parse_resolved_state`). Both the raw `lvgl`
+ *  getter and the `framework.js` wrapper reject anything else with a
+ *  `TypeError`. */
 export interface StyleSelector {
     readonly part?: StylePart;
     readonly state?: ResolvedState;

@@ -288,6 +288,54 @@ a `TypeError` at mount.
 `partStyles` is unrelated to `<span parts={…}>`, which describes styled text
 runs inside one span widget.
 
+## Imperative escape hatches (charts, msgbox)
+
+Two things do not fit the mount-once declarative tree and are driven through
+function calls instead. Chart series are created from a `ref` callback:
+
+```jsx
+import { chartAddSeries, chartSetSeriesColor, chartSetData } from "./js/framework.js";
+
+<chart
+    style={{ width: 300, height: 180 }}
+    ref={(node) => {
+        const series = chartAddSeries(node, "#409EFF");
+        chartSetData(node, series, [10, 40, 25, 70, 55]);
+        chartSetSeriesColor(node, series, "#67C23A");   // recolour later
+    }}
+/>
+```
+
+`chartSetData` replaces the whole point array. These three take a literal
+colour (`#rrggbb` or a named colour) — they are **not** style properties, so
+a `"$token"` reference does not resolve here. To make a series follow the
+theme, read the token off the native module first:
+
+```js
+import * as lv from "lvgl";
+chartSetSeriesColor(node, series, lv.getThemeToken("primary.base"));
+```
+
+`getThemeToken` / `getThemeMetric` live on the `"lvgl"` module rather than on
+`framework.js`. `chartSetSeriesColor` exists because `lv_chart_add_series`
+copies the colour into the series struct, so a later theme change cannot
+reach a series that already exists.
+
+A modal is opened on demand — there is no declarative form, because it has no
+place in a tree that mounts once:
+
+```js
+import { showMsgbox } from "./js/framework.js";
+
+showMsgbox(
+    { title: "确认", text: "要删除这一项吗？", buttons: ["取消", "删除"] },
+    (index) => console.log("clicked", index),   // onClose is optional
+);
+```
+
+`onClose` receives the 0-based index of the button that was pressed, or `-1`
+when the msgbox was dismissed through its close button.
+
 ## Animations
 
 ```js
@@ -342,6 +390,10 @@ families, `overlay_mask`, `white`, `black`). Integer tokens are the metrics
 `on_surface`, `on_variant`, `outline`, `track`, `danger`, `warning`) still
 work as aliases of the canonical roles. `doc/theme.md` is the authoritative
 list with exact hex values.
+
+`control_height` is the one metric that is registered and settable but that
+no theme style currently consumes — patching it type-checks and succeeds, yet
+repaints nothing. Widget heights come from LVGL's own content sizing today.
 
 An unknown token name, or a value of the wrong kind (a number for a colour
 token, a colour for an integer token), throws a `TypeError`. The full set is
@@ -529,7 +581,7 @@ npx -y -p typescript@5 tsc --strict --target ES2020 --lib ES2020,DOM \
 | --------------------- | ------------------------------------------------ |
 | `examples/showcase`   | **The core demo** — all 31 host tags, light/dark themes + runtime tokens, CJK role fonts, image family, on-screen keyboard, chart/menu/msgbox, animation engine. Interactive by default; `STONEGUI_SHOWCASE_SMOKE=1` runs the scripted regression |
 | `examples/jsx`        | JSX + esbuild toolchain — widget showcase via real JSX (transpiled) |
-| `examples/test`       | Framework / theme / layout / input / keyboard — 492 assertions |
+| `examples/test`       | Framework / theme / layout / input / keyboard — 534 assertions |
 
 ### `examples/jsx` — JSX (React/Vue style)
 
@@ -552,7 +604,7 @@ committed so the demo runs without installing anything; you only need
 
 LVGL 9.x + QuickJS + SDL2 on Linux.
 
-**Implemented:** 30+ widgets (incl. on-screen `keyboard`, `<animimg>` loops
+**Implemented:** 31 host tags (incl. on-screen `keyboard`, `<animimg>` loops
 and `<imagebutton>` per-state PNGs via the new `loadImage` handle system),
 style props with pseudo-states (default/hover/focus/pressed/checked/disabled)
 and per-part `partStyles`, a self-contained (`parent = NULL`) Vue Element Plus

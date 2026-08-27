@@ -1432,6 +1432,8 @@ static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
         int32_t state = LV_STATE_DEFAULT;
         JSValue part_value = JS_GetPropertyStr(ctx, argv[2], "part");
         JSValue state_value = JS_GetPropertyStr(ctx, argv[2], "state");
+        bool part_type_valid = JS_IsUndefined(part_value) || JS_IsString(part_value);
+        bool state_type_valid = JS_IsUndefined(state_value) || JS_IsString(state_value);
         if (JS_IsString(part_value)) {
             const char *part_string = JS_ToCString(ctx, part_value);
             if (part_string) {
@@ -1448,6 +1450,17 @@ static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
         }
         JS_FreeValue(ctx, part_value);
         JS_FreeValue(ctx, state_value);
+        if (!part_type_valid || !state_type_valid) {
+            JS_FreeCString(ctx, key);
+            return JS_ThrowTypeError(ctx, !part_type_valid
+                ? "getProperty: part must be a string"
+                : "getProperty: state must be a string");
+        }
+        if (part < 0 || state < 0) {
+            JS_FreeCString(ctx, key);
+            return JS_ThrowTypeError(ctx, part < 0
+                ? "getProperty: unknown part" : "getProperty: unknown state");
+        }
         selector = (lv_style_selector_t)(part | state);
 
         /* LVGL renders a dropdown's SELECTED row and its popup SCROLLBAR on a
@@ -1539,7 +1552,8 @@ static JSValue js_getProperty(JSContext *ctx, JSValueConst this_val,
     } else if (strcmp(key, "value") == 0) {
         out = widget_value_to_js(ctx, obj);
     } else {
-        out = JS_UNDEFINED;
+        JS_FreeCString(ctx, key);
+        return JS_ThrowTypeError(ctx, "getProperty: unknown key");
     }
 
     JS_FreeCString(ctx, key);
@@ -1628,12 +1642,20 @@ static sg_font_file_t *load_font_file(const char *path) {
 
     size_t len = (size_t)file_len;
     uint8_t *data = lv_malloc(len);
-    if (!data || fread(data, 1, len, f) != len) { fclose(f); return NULL; }
+    if (!data) { fclose(f); return NULL; }
+    if (fread(data, 1, len, f) != len) {
+        lv_free(data);
+        fclose(f);
+        return NULL;
+    }
     fclose(f);
 
     size_t path_len = strlen(path) + 1;
     char *stored_path = lv_malloc(path_len);
-    if (!stored_path) return NULL;
+    if (!stored_path) {
+        lv_free(data);
+        return NULL;
+    }
     memcpy(stored_path, path, path_len);
 
     sg_font_file_t *entry = &g_font_files[g_font_file_count++];

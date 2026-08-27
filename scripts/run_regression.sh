@@ -98,6 +98,12 @@ if [[ ! -x "$BINARY" ]]; then
     hard_failure "build" "missing executable: $BINARY" "$RUN_DIR/build.log"
 fi
 
+echo ">>> Verify theme token registry parity"
+node "$ROOT_DIR/tools/verify_theme_token_parity.mjs" \
+    >"$RUN_DIR/theme-token-parity.log" 2>&1 \
+    || hard_failure "theme-token-parity" "token registries disagree" \
+        "$RUN_DIR/theme-token-parity.log"
+
 if ((SKIP_JSX_BUILD == 0)); then
     echo ">>> Rebuild JSX"
     (

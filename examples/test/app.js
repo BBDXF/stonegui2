@@ -390,6 +390,24 @@ console.log("\n== theme scheme + token swap (A phase) ==");
     }
     check(invalidSelectorThrew, "invalid resolved-style selector throws TypeError");
 
+    const rawGetterFailures = [
+        ["unknown key", () => lv.getProperty(btn, "bogusKey")],
+        ["unknown part", () => lv.getProperty(slider, "backgroundColor", { part: "bogus" })],
+        ["unknown state", () => lv.getProperty(btn, "backgroundColor", { state: "bogus" })],
+        ["numeric part", () => lv.getProperty(slider, "backgroundColor", { part: 123 })],
+        ["boolean state", () => lv.getProperty(btn, "backgroundColor", { state: false })],
+        ["null part", () => lv.getProperty(slider, "backgroundColor", { part: null })],
+    ];
+    for (const [selectorKind, read] of rawGetterFailures) {
+        let threw = false;
+        try {
+            read();
+        } catch (error) {
+            threw = error instanceof TypeError;
+        }
+        check(threw, `raw lv.getProperty rejects ${selectorKind}`);
+    }
+
     setThemeToken("primary", "#e74c3c");
     check(getProperty(btn, "backgroundColor") === "#e74c3c",
           "setThemeToken rebuilds shared styles (was a silent no-op)");
