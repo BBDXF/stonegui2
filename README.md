@@ -67,6 +67,12 @@ Run the canonical full regression from the repository root:
 ./scripts/run_regression.sh --skip-jsx-build  # repeat without rebuilding JSX
 ```
 
+It configures + builds, gates on theme token-registry parity
+(`tools/verify_theme_token_parity.mjs`) and the strict declaration check
+(`tsc --noEmit js/framework.d.ts`), then runs the `examples/test` assertion
+bundle (534 assertions), the showcase smoke test, and the interactive
+`jsx` / `showcase` bundles.
+
 ## Components (host tags)
 
 31 lowercase JSX host tags map to LVGL widgets. Capitalised aliases also work.

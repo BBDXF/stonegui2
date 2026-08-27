@@ -66,7 +66,10 @@ cmake -S . -B build && cmake --build build      # produces ./build/stonegui
 
   The runner requires exit 0 plus named pass markers from the finite assertion
   and showcase-smoke bundles; only its explicitly classified interactive bundles
-  may pass with timeout status 143. It also runs the strict declaration check.
+  may pass with timeout status 143. Before the bundles it gates on
+  `tools/verify_theme_token_parity.mjs` (the token registries in `sg_theme.h`,
+  `sg_theme.c` and `framework.d.ts` must agree) and it runs the strict
+  declaration check (`tsc --noEmit js/framework.d.ts`).
 
 ## Adding a widget / prop / event (multi-file change)
 
@@ -153,15 +156,27 @@ The legacy flat names (`primary`, `primary_dark`, `on_primary`, `secondary`,
 `bg`, `surface`, `on_surface`, `on_variant`, `outline`, `track`, `danger`,
 `warning`) remain as aliases sharing storage with their canonical roles;
 `radius_btn` / `radius_field` are independent fields defaulting to
-`radius_base`. `doc/theme.md` is the authoritative table with exact hexes and
-`tools/verify_theme_tokens.mjs --check` verifies it.
+`radius_base`. `doc/theme.md` is the authoritative table with exact hexes.
+
+Three tools guard the theme, each a different axis:
+- `tools/verify_theme_tokens.mjs --check` — the hex values in `doc/theme.md`
+  match `tools/theme_tokens.expected.json` (colour correctness).
+- `tools/verify_theme_token_parity.mjs` — the token *registries* in
+  `sg_theme.h`, `sg_theme.c` and `framework.d.ts` list the same names/kinds
+  (no drift when adding a token). This one runs inside `run_regression.sh`.
+- `tools/verify_theme_coverage_mutation.sh` — mutation test: builds a throwaway
+  copy, flips five `sg_theme.c` style rules and asserts `examples/test` catches
+  each (proves the coverage assertions aren't vacuous). Run by hand; slow
+  because it recompiles.
 
 An unknown name returns `SG_THEME_TOKEN_UNKNOWN` and a kind mismatch returns
 `SG_THEME_TOKEN_WRONG_KIND`; both surface to JS as a `TypeError`. The same
 split exists in `js/framework.d.ts` as `ColorThemeTokenName` vs
 `IntegerThemeTokenName`, so `setThemeToken` overloads reject the wrong value
 kind at compile time. **Adding a token means editing `sg_theme.h`, the
-registry in `sg_theme.c`, `doc/theme.md` and `framework.d.ts` together.**
+registry in `sg_theme.c`, `doc/theme.md` and `framework.d.ts` together** —
+`tools/verify_theme_token_parity.mjs` (run by `run_regression.sh`) fails the
+build if any of those three registries drift out of sync.
 
 Style props may reference a colour token live with `"$name"` on
 `backgroundColor`, `borderColor` and `textColor` only (`COLOR_STYLE_PROPERTIES`
