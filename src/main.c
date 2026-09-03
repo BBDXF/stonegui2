@@ -74,9 +74,73 @@ static int  g_enable_hot_reload = 1;
 static char g_bundle_dir[1024]  = "";
 static char g_bundle_name[256]  = "";
 
+/* ── Mouse wheel scrolling ──────────────────────────────────────────────────
+ *
+ * LVGL's own SDL wheel driver (lv_sdl_mousewheel_create) is an ENCODER: it
+ * drives the focus GROUP, so it scrolls whatever is focused rather than what
+ * the cursor is over. Desktop users expect the latter, so we resolve the
+ * target geometrically instead.
+ *
+ * lv_obj_hit_test() is not usable for this — it returns false for anything
+ * without LV_OBJ_FLAG_CLICKABLE, which most scroll containers are.
+ */
+#define SG_WHEEL_STEP_PX 48
+
+static lv_obj_t *sg_deepest_obj_at(lv_obj_t *parent, int32_t x, int32_t y) {
+    for (uint32_t i = lv_obj_get_child_count(parent); i > 0; i--) {
+        lv_obj_t *child = lv_obj_get_child(parent, (int32_t)(i - 1));
+        if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) continue;
+
+        lv_area_t a;
+        lv_obj_get_coords(child, &a);
+        if (x < a.x1 || x > a.x2 || y < a.y1 || y > a.y2) continue;
+
+        lv_obj_t *deeper = sg_deepest_obj_at(child, x, y);
+        return deeper ? deeper : child;
+    }
+    return NULL;
+}
+
+/* Walks outward until a container can actually move in `dy`, so a list that
+ * has hit its end hands the gesture to the page behind it. */
+static lv_obj_t *sg_scroll_target(lv_obj_t *obj, int32_t dy) {
+    while (obj) {
+        if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE)) {
+            int32_t room = dy < 0 ? lv_obj_get_scroll_bottom(obj)
+                                  : lv_obj_get_scroll_top(obj);
+            if (room > 0) return obj;
+        }
+        obj = lv_obj_get_parent(obj);
+    }
+    return NULL;
+}
+
+static void sg_handle_mousewheel(const SDL_Event *e) {
+    if (e->wheel.y == 0) return;
+
+    lv_display_t *disp = lv_display_get_default();
+    lv_obj_t *screen = disp ? lv_display_get_screen_active(disp) : NULL;
+    if (!screen) return;
+
+    uint8_t zoom = lv_sdl_window_get_zoom(disp);
+    if (zoom < 1) zoom = 1;
+
+    int mx = 0, my = 0;
+    SDL_GetMouseState(&mx, &my);
+
+    int32_t dy = e->wheel.y * SG_WHEEL_STEP_PX;
+    if (e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED) dy = -dy;
+
+    lv_obj_t *under = sg_deepest_obj_at(screen, mx / zoom, my / zoom);
+    lv_obj_t *target = sg_scroll_target(under ? under : screen, dy);
+    if (target) lv_obj_scroll_by_bounded(target, 0, dy, LV_ANIM_ON);
+}
+
 static int sdl_event_watch(void *userdata, SDL_Event *e) {
     (void)userdata;
     if (e->type == SDL_QUIT) { g_running = 0; return 1; }
+
+    if (e->type == SDL_MOUSEWHEEL) { sg_handle_mousewheel(e); return 1; }
 
     if (e->type == SDL_KEYDOWN && g_kbd_group) {
         lv_obj_t *focused = lv_group_get_focused(g_kbd_group);
