@@ -8,10 +8,12 @@ import {
   chartAddSeries,
   chartSetData,
   showMsgbox,
-  getProperty
+  getProperty,
+  setWindowTitle
 } from "../../js/framework.js";
 import * as lv from "lvgl";
 setDefaultFont();
+setWindowTitle("stonegui - Widget Showcase");
 const _cjkPath = lv.findCjkFontPath();
 const fontTitle = _cjkPath ? loadFont(_cjkPath, 28) : 0;
 function Row({ height = 56, gap = 12, children }) {
@@ -203,7 +205,14 @@ function ListsTab() {
   const [reel, setReel] = createSignal(0);
   const KEYS = ["1", "2", "3", "\n", "4", "5", "6", "\n", "7", "8", "9", "\n", "C", "0", "="];
   const ITEMS = ["Inbox", "Sent", "Drafts", "Spam", "Trash", "Archive"];
-  return /* @__PURE__ */ h(TabPage, null, /* @__PURE__ */ h("text", { style: { textColor: "#4c4f69" } }, () => `Selected list item: ${selected()}`), /* @__PURE__ */ h("list", { style: { width: "100%", height: 180, borderRadius: 8 } }, ITEMS.map((it) => /* @__PURE__ */ h("listButton", { text: it, onClick: () => setSelected(it) }))), /* @__PURE__ */ h(Row, { height: 40 }, /* @__PURE__ */ h("text", { style: { textColor: "#4c4f69", width: "100%" } }, () => `Button matrix pressed: ${pressed() < 0 ? "(none)" : KEYS.filter((k) => k !== "\n")[pressed()]}`)), /* @__PURE__ */ h(
+  return /* @__PURE__ */ h(TabPage, null, /* @__PURE__ */ h("text", { style: { textColor: "#4c4f69" } }, () => `Selected list item: ${selected()}`), /* @__PURE__ */ h("list", { style: { width: "100%", height: 180, borderRadius: 8 } }, ITEMS.map((it) => /* @__PURE__ */ h(
+    "listButton",
+    {
+      text: it,
+      checked: () => selected() === it,
+      onClick: () => setSelected(it)
+    }
+  ))), /* @__PURE__ */ h(Row, { height: 40 }, /* @__PURE__ */ h("text", { style: { textColor: "#4c4f69", width: "100%" } }, () => `Button matrix pressed: ${pressed() < 0 ? "(none)" : KEYS.filter((k) => k !== "\n")[pressed()]}`)), /* @__PURE__ */ h(
     "buttonMatrix",
     {
       style: { width: "100%", height: 200 },

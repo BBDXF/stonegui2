@@ -14,13 +14,14 @@
 
 import {
     h, Fragment, render, createSignal, loadFont, setDefaultFont,
-    chartAddSeries, chartSetData, showMsgbox, getProperty,
+    chartAddSeries, chartSetData, showMsgbox, getProperty, setWindowTitle,
 } from "../../js/framework.js";
 import * as lv from "lvgl";
 
 /* ── Fonts ───────────────────────────────────────────────────────────────── */
 
 setDefaultFont();
+setWindowTitle("stonegui - Widget Showcase");
 const _cjkPath = lv.findCjkFontPath();
 const fontTitle = _cjkPath ? loadFont(_cjkPath, 28) : 0;
 
@@ -188,7 +189,11 @@ function ListsTab() {
             </text>
             <list style={{ width: "100%", height: 180, borderRadius: 8 }}>
                 {ITEMS.map((it) => (
-                    <listButton text={it} onClick={() => setSelected(it)} />
+                    <listButton
+                        text={it}
+                        checked={() => selected() === it}
+                        onClick={() => setSelected(it)}
+                    />
                 ))}
             </list>
 
