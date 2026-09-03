@@ -312,6 +312,14 @@ int main(int argc, char *argv[]) {
     lv_display_set_default(disp);
     lv_sdl_window_set_resizeable(disp, true);
 
+    /* lv_sdl_window_create() calls SDL_StartTextInput() before it creates the
+     * window, so SDL's X11 backend has no window to bind the XIM input context
+     * to. Plain SDL_TEXTINPUT still arrives, but an IME (fcitx5/ibus) grabs the
+     * keys and its composed text never comes back. Re-arm now that the window
+     * exists so the input context is created and focused against it. */
+    SDL_StopTextInput();
+    SDL_StartTextInput();
+
     SDL_AddEventWatch(sdl_event_watch, NULL);
 
     /* Install stonegui's default look & feel (Flutter/Material-like) */
