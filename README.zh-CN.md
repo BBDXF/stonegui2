@@ -14,6 +14,10 @@ h("Text", { text: () => `Count: ${count()}` })
 // lv_label_set_text(...)      // a single property update, not a remount
 ```
 
+> **项目状态 —— 已于 2026-09 停止扩展功能面。** 现有内容可运行且有回归覆盖，
+> 但不再朝"通用桌面 GUI 框架"方向继续开发。瓶颈、根因与后续方案对比见
+> [`doc/retrospective.md`](doc/retrospective.md)。
+
 最初的（且已部分过时的）设计构想见 [`doc/prompts.md`](doc/prompts.md)；本文档的
 其余部分反映的是当前实际交付的内容。
 

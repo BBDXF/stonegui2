@@ -14,6 +14,12 @@ h("Text", { text: () => `Count: ${count()}` })
 // lv_label_set_text(...)      // a single property update, not a remount
 ```
 
+> **Project status — feature work stopped (2026-09).** What ships here works and
+> is regression-covered, but the project is no longer being extended toward a
+> general-purpose desktop GUI framework. The bottlenecks, root cause and an
+> evaluation of the alternatives are written up in
+> [`doc/retrospective.md`](doc/retrospective.md).
+
 See [`doc/prompts.md`](doc/prompts.md) for the original (and partly stale)
 design vision; the rest of this README reflects what currently ships.
 

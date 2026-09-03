@@ -549,6 +549,13 @@ never hardcode an absolute path, the repo moves.
 
 ## Known gaps (still open)
 
+> Feature work stopped in 2026-09. The gaps below are the *small* ones; the
+> structural blockers that ended the project (desktop window semantics, input
+> model mismatch, accessibility, text shaping, zero cross-platform validation)
+> plus a comparison of the alternatives are in
+> [`doc/retrospective.md`](doc/retrospective.md). Read that before proposing
+> new feature work.
+
 - **Wayland backend** — `build/_deps/lvgl-src/src/drivers/wayland/` ships,
   needs system `libwayland-client-dev` and a parallel `lv_wayland_window_create`
   branch in `main.c`.

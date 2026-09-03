@@ -15,6 +15,9 @@
 > (83 assertions, includes the A/C/E phase behaviour, not just mount smoke).
 > Anything still open is tracked in [`AGENTS.md`](../AGENTS.md) "Known gaps" —
 > this file is history, not a queue.
+>
+> **There is no Phase IV.** Feature work stopped in 2026-09; why, and what the
+> alternatives are, is in [`retrospective.md`](retrospective.md).
 
 The author asked for the next wave of foundational GUI work to cover:
 **theme**, **widget defaults**, **CJK fonts**, **input field
