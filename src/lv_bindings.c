@@ -2115,6 +2115,19 @@ static JSValue js_focus(JSContext *ctx, JSValueConst this_val,
     return JS_NewBool(ctx, lv_group_get_focused(g_group) == obj);
 }
 
+static JSValue js_setWindowTitle(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_EXCEPTION;
+    const char *title = JS_ToCString(ctx, argv[0]);
+    if (!title) return JS_EXCEPTION;
+
+    lv_display_t *disp = lv_display_get_default();
+    if (disp) lv_sdl_window_set_title(disp, title);
+    JS_FreeCString(ctx, title);   /* SDL_SetWindowTitle keeps its own copy */
+    return JS_NewBool(ctx, disp != NULL);
+}
+
 /* sendKey(name, ctrl) — inject an SDL key press.
  *
  * SDL_PushEvent runs every SDL_AddEventWatch callback SYNCHRONOUSLY before
@@ -2492,6 +2505,7 @@ static const JSCFunctionListEntry lv_funcs[] = {
     JS_CFUNC_DEF("clipboardRead",  0, js_clipboardRead),
     JS_CFUNC_DEF("clipboardWrite", 1, js_clipboardWrite),
     JS_CFUNC_DEF("focus",          1, js_focus),
+    JS_CFUNC_DEF("setWindowTitle", 1, js_setWindowTitle),
     JS_CFUNC_DEF("sendKey",        2, js_sendKey),
     JS_CFUNC_DEF("sendEvent",      2, js_sendEvent),
 };

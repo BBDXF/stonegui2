@@ -636,6 +636,10 @@ export function sendKey(key, ctrl = false) {
     return lv.sendKey(key, ctrl);
 }
 
+export function setWindowTitle(title) {
+    return lv.setWindowTitle(String(title));
+}
+
 export function setTheme(scheme) {
     const result = lv.setTheme(scheme);
     setThemeVersion((version) => version + 1);

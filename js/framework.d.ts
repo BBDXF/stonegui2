@@ -49,6 +49,7 @@ declare module "lvgl" {
     export function loadImages(paths: string[]): number[];
     export function focus(node: number): boolean;
     export function sendKey(key: string, ctrl?: boolean): boolean;
+    export function setWindowTitle(title: string): boolean;
     export function sendEvent(node: number, event: "click" | "released" | "change"): boolean;
     export function clipboardRead(): string | null;
     export function clipboardWrite(text: string): void;
@@ -231,6 +232,9 @@ export function focus(node: number): boolean;
 /** Inject an SDL key press ("a".."z", "home", "end") for smoke tests and
  *  automation. Ctrl combos drive the `<input>` clipboard shortcuts. */
 export function sendKey(key: string, ctrl?: boolean): boolean;
+
+/** Set the native window title (SDL/X11). */
+export function setWindowTitle(title: string): boolean;
 
 /** Swap the whole live token set. Every mounted widget repaints in place;
  *  nothing is remounted and JS local styles survive. */
