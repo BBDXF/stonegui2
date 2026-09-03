@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # stonegui
 
 A modern, declarative embedded GUI framework: **QuickJS + LVGL**, rendering
