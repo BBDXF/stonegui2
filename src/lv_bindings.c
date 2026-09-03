@@ -407,6 +407,35 @@ static void sg_spinbox_block_insert_cb(lv_event_t *e) {
     lv_textarea_set_insert_replace(lv_event_get_target(e), "");
 }
 
+/* With raw insertion blocked above, digits would be swallowed entirely, so
+ * apply them to the VALUE instead: a typed digit overwrites the digit at the
+ * cursor's current step position and the cursor advances one place right,
+ * which keeps the configured digit format intact.
+ *
+ * Every lv_spinbox_* mutator routes through lv_spinbox_updatevalue ->
+ * lv_textarea_set_text, which already raises LV_EVENT_VALUE_CHANGED, so this
+ * must not send one itself. That also means advancing the cursor emits a
+ * second, identical VALUE_CHANGED: LVGL exposes no way to move the step
+ * without a redraw. Both carry the final value, so onChange repeats rather
+ * than reporting a stale one; the guard below at least spares the last digit,
+ * where the step cannot advance anyway. */
+static void sg_spinbox_digit_key_cb(lv_event_t *e) {
+    const uint32_t c = *(const uint32_t *)lv_event_get_param(e);
+    if (c < '0' || c > '9') return;
+
+    lv_obj_t *obj = lv_event_get_target(e);
+    const int32_t step = lv_spinbox_get_step(obj);
+    if (step <= 0) return;
+
+    const int32_t value = lv_spinbox_get_value(obj);
+    const int32_t sign  = value < 0 ? -1 : 1;
+    const int32_t mag   = value < 0 ? -value : value;
+    const int32_t digit = (mag / step) % 10;
+
+    lv_spinbox_set_value(obj, sign * (mag + ((int32_t)(c - '0') - digit) * step));
+    if (step > 1) lv_spinbox_step_next(obj);
+}
+
 static void make_clean_container(lv_obj_t *obj) {
     lv_obj_set_style_bg_opa(obj, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(obj, 0, 0);
@@ -555,6 +584,8 @@ static JSValue js_createNode(JSContext *ctx, JSValueConst this_val,
         lv_spinbox_set_step(obj, 1);
         lv_obj_add_event_cb(obj, sg_spinbox_block_insert_cb,
                             LV_EVENT_INSERT, NULL);
+        lv_obj_add_event_cb(obj, sg_spinbox_digit_key_cb,
+                            LV_EVENT_KEY, NULL);
         /* Each step calls lv_textarea_set_cursor_pos, which scrolls the
          * cursor into view with LV_ANIM_ON, producing a visible jitter
          * on every increment. LV_ANIM_ON honours LV_PART_MAIN's
