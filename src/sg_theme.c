@@ -323,6 +323,7 @@ static bool                       g_dark   = false;
     X(st_knob) \
     X(st_arc_main) \
     X(st_arc_indic) \
+    X(st_cb_main) \
     X(st_cb_box) \
     X(st_cb_box_checked) \
     X(st_dropdown_base) \
@@ -517,16 +518,25 @@ static void styles_init(const sg_theme_tokens_t *t) {
     lv_style_set_bg_opa(&st_sw_bg, LV_OPA_COVER);
     lv_style_set_radius(&st_sw_bg, t->radius_round);
 
+    /* The indicator is a separate drawable stacked on the track, so it needs
+     * its own radius: LV_PART_INDICATOR defaults to 0 and this theme has no
+     * parent to supply one, which rendered the checked switch as a hard
+     * rectangle sitting inside the rounded track. */
     lv_style_init(&st_sw_indic);
     lv_style_set_bg_color(&st_sw_indic, t->primary);
     lv_style_set_bg_opa(&st_sw_indic, LV_OPA_TRANSP);
+    lv_style_set_radius(&st_sw_indic, t->radius_round);
 
     lv_style_init(&st_sw_bg_on);
     lv_style_set_bg_color(&st_sw_bg_on, t->primary);
     lv_style_set_bg_opa(&st_sw_bg_on, LV_OPA_COVER);
 
+    /* bg_opa is as load-bearing as bg_color here: without a parent theme the
+     * knob's default opacity is TRANSP, so setting only the colour left the
+     * knob invisible in BOTH states. */
     lv_style_init(&st_sw_knob);
     lv_style_set_bg_color(&st_sw_knob, t->white);
+    lv_style_set_bg_opa(&st_sw_knob, LV_OPA_COVER);
     lv_style_set_radius(&st_sw_knob, t->radius_round);
 
     /* Progress (bar): thin pill, light track, primary indicator. */
@@ -567,6 +577,11 @@ static void styles_init(const sg_theme_tokens_t *t) {
     lv_style_set_arc_width(&st_arc_indic, t->arc_width);
     lv_style_set_arc_rounded(&st_arc_indic, true);
 
+    /* lv_checkbox.c reads pad_column off LV_PART_MAIN as the gap between the
+     * indicator box and the caption; unset it renders them flush together. */
+    lv_style_init(&st_cb_main);
+    lv_style_set_pad_column(&st_cb_main, t->space_sm);
+
     /* Checkbox indicator (the box): rounded, outlined; primary when checked. */
     lv_style_init(&st_cb_box);
     lv_style_set_radius(&st_cb_box, t->radius_small);
@@ -590,6 +605,8 @@ static void styles_init(const sg_theme_tokens_t *t) {
     lv_style_set_border_color(&st_dropdown_base, t->border_base);
     lv_style_set_border_width(&st_dropdown_base, t->border_width);
     lv_style_set_radius(&st_dropdown_base, t->radius_field);
+    lv_style_set_pad_hor(&st_dropdown_base, t->space_md);
+    lv_style_set_pad_ver(&st_dropdown_base, t->space_sm);
 
     /* Dropdown popup-list row under the pointer: §7 neutral hover surface. */
     lv_style_init(&st_dropdown_sel);
@@ -1450,6 +1467,7 @@ static void styles_apply_controls(lv_obj_t *obj,
         lv_obj_add_style(obj, &st_spinner_knob, LV_PART_KNOB);
     }
     else if (cls == &lv_checkbox_class) {
+        lv_obj_add_style(obj, &st_cb_main, 0);
         lv_obj_add_style(obj, &st_focus_ring, LV_STATE_FOCUS_KEY);
         lv_obj_add_style(obj, &st_cb_checked_text, LV_STATE_CHECKED);
         lv_obj_add_style(obj, &st_disabled_text, LV_STATE_DISABLED);

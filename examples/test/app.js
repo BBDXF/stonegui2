@@ -589,6 +589,15 @@ console.log("\n== foundational control states + parts (doc/theme.md §7, §8) ==
           "switch disabled knob is fill_base");
     check(getProperty(sw, "backgroundColor", { part: "knob" }) === "#ffffff",
           "switch knob stays white in the default state");
+    /* A white knob with bg_opa 0 is invisible, and colour-only assertions pass
+     * for it; this theme has no parent to supply the opacity default. */
+    check(getProperty(sw, "bgOpa", { part: "knob" }) === 255,
+          "switch knob is actually opaque, not just white");
+    /* LV_PART_INDICATOR defaults to radius 0, which drew the checked switch as
+     * a rectangle inside the rounded track. */
+    check(getProperty(sw, "radius", { part: "indicator", state: "checked" }) ===
+          getProperty(sw, "radius"),
+          "switch checked indicator is as round as its track");
 
     /* Row 8 — slider. */
     check(getProperty(slider, "backgroundColor",
@@ -638,6 +647,8 @@ console.log("\n== foundational control states + parts (doc/theme.md §7, §8) ==
 
     /* Row 12 — the popup list is a separate lv_dropdownlist object, which is
      * where LVGL actually reads SELECTED/SCROLLBAR from. */
+    check(getProperty(dd, "padding") > 0,
+          "dropdown closed field pads its text away from the border");
     check(getProperty(dd, "backgroundColor", { part: "selected" }) === "#f5f7fa",
           "dropdown popup row is the fill_light neutral hover surface");
     check(getProperty(dd, "backgroundColor",
