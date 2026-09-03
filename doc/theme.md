@@ -5,17 +5,15 @@
 matrix) reads *this* file for exact values. Do not re-derive colours elsewhere;
 do not hand-edit the tables below.
 
-Every hex value in this document was **copy-pasted from the output of**
-`node tools/verify_theme_tokens.mjs --check` — never typed by hand. That script
-re-derives all 30 ramp colours and all dark neutrals from the six Element Plus
-base colours using the mixing formula documented in
-[§2](#2-the-mixing-formula), so the document and the code cannot silently
-diverge:
+Every hex value in this document was **generated, never typed by hand**: a
+verifier re-derived all 30 ramp colours and all dark neutrals from the six
+Element Plus base colours using the mixing formula in
+[§2](#2-the-mixing-formula), and its 159 `key=value` output lines were pasted
+in verbatim.
 
-```sh
-node tools/verify_theme_tokens.mjs --check                        # exit 0, 159 key=value lines
-node tools/verify_theme_tokens.mjs --expect primary.light_9=#000000  # exit 1, names expected/actual
-```
+That verifier (`tools/verify_theme_tokens.mjs`) has since been removed, so
+**the document and the code can now diverge silently.** Re-derive by hand from
+[§2](#2-the-mixing-formula) when changing a base colour.
 
 ## 0. Sources of truth
 
@@ -87,8 +85,9 @@ reimplementation:
    levels get *darker*, and `dark-2` becomes a *brighter* hover colour. Copying
    the light formula into dark mode is the single most likely bug here.
 
-`tools/verify_theme_tokens.mjs` implements exactly the above
-(`roundSass` / `mixSass` / `mixOverlay`).
+The removed verifier implemented exactly the above (`roundSass` / `mixSass` /
+`mixOverlay`); reimplement those three functions if you need to regenerate the
+tables.
 
 ## 3. Derived ramps — LIGHT
 
@@ -437,8 +436,8 @@ and `setThemeToken("primary", "#e74c3c")` all still hold.
 
 ## 10. Canonical key names (verifier vocabulary)
 
-`tools/verify_theme_tokens.mjs` prints these namespaces, one `key=value` per
-line. Light-scheme keys are unprefixed; dark-scheme keys carry a `dark.` prefix.
+These are the namespaces the generator emitted, one `key=value` per line.
+Light-scheme keys are unprefixed; dark-scheme keys carry a `dark.` prefix.
 
 | Namespace | Example | Count |
 | --- | --- | --- |

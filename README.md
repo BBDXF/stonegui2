@@ -15,6 +15,20 @@ h("Text", { text: () => `Count: ${count()}` })
 See [`doc/prompts.md`](doc/prompts.md) for the original (and partly stale)
 design vision; the rest of this README reflects what currently ships.
 
+## Screenshots
+
+`examples/showcase` — the same screen in both schemes. `setTheme("dark")`
+rebuilds the shared styles in place and repaints every widget; nothing is
+remounted and inline styles survive.
+
+| Light | Dark |
+| --- | --- |
+| ![showcase, light scheme](doc/screenshots/showcase-light.png) | ![showcase, dark scheme](doc/screenshots/showcase-dark.png) |
+
+| Charts and data widgets | `examples/jsx` — the same API through real JSX |
+| --- | --- |
+| ![showcase data cards](doc/screenshots/showcase-widgets.png) | ![jsx demo](doc/screenshots/jsx-demo.png) |
+
 ## Architecture
 
 ```text
@@ -60,18 +74,19 @@ for offline work or upstream hacking.
 Press `Ctrl+C` or close the window to exit cleanly (`lv_deinit` →
 `JS_FreeRuntime` → `SDL_Quit`, exit code `128+signo`).
 
-Run the canonical full regression from the repository root:
+There is no CI and no regression runner. Check a change by running the
+bundles yourself from the repository root:
 
 ```sh
-./scripts/run_regression.sh
-./scripts/run_regression.sh --skip-jsx-build  # repeat without rebuilding JSX
+./build/stonegui --no-watch examples/test/app.js   # 537 assertions, exit 0
+STONEGUI_SHOWCASE_SMOKE=1 ./build/stonegui --no-watch examples/showcase/app.js
+npx -y -p typescript@5 tsc --strict --target ES2020 --lib ES2020,DOM \
+    --noEmit js/framework.d.ts                     # declarations type-check
 ```
 
-It configures + builds, gates on theme token-registry parity
-(`tools/verify_theme_token_parity.mjs`) and the strict declaration check
-(`tsc --noEmit js/framework.d.ts`), then runs the `examples/test` assertion
-bundle (534 assertions), the showcase smoke test, and the interactive
-`jsx` / `showcase` bundles.
+The assertion bundle prints `ALL TESTS PASSED`; the showcase smoke prints
+`SHOWCASE SMOKE PASSED`. The interactive `jsx` / `showcase` bundles have no
+exit condition — run them under `timeout` and treat status 143 as success.
 
 ## Components (host tags)
 
@@ -98,7 +113,7 @@ See [`js/framework.d.ts`](js/framework.d.ts) and
 | `tab`          | `lv_tab` (internal) | Tabview page                           |
 | `list`         | `lv_list`           | With `<listButton text="...">` items   |
 | `listButton`   | (internal)          | List row                               |
-| `spinbox`      | `lv_spinbox`        | Numeric stepper                        |
+| `spinbox`      | `lv_spinbox`        | Numeric stepper; type digits or `↑`/`↓` |
 | `led`          | `lv_led`            | Coloured indicator                     |
 | `chart`        | `lv_chart`          | Line / bar / scatter; series via `ref` |
 | `buttonMatrix` | `lv_buttonmatrix`   | Grid of buttons, `"\n"` row separators |
@@ -511,6 +526,16 @@ h("Text", { style: { font: title }, text: "标题" });    // explicit override
   size you need. (`fontSize: 14|16|20|24` selects the built-in Latin
   Montserrat sizes.)
 
+### Emoji are not supported
+
+**Emoji are not supported and render as tofu boxes.** This is a property of
+the text stack, not a missing font: Tiny-TTF's `stb_truetype` backend reads
+only `glyf`/`CFF` outlines and has no support for the `CBDT`/`COLR`/`sbix`
+colour-glyph tables that every emoji font uses, so loading e.g.
+`NotoColorEmoji.ttf` changes nothing. LVGL's own answer is `LV_USE_IMGFONT`
+(one image per codepoint), which this build leaves off. CJK text, CJK
+punctuation and `LV_SYMBOL_*` glyphs are unaffected.
+
 ## Input field props
 
 All props may be reactive (`() => signal()`).
@@ -561,7 +586,40 @@ and corrupts them).
 
 To compose Chinese you still need a system **IME** (e.g. fcitx5 or ibus)
 running. Each `Input` reports its on-screen rectangle to SDL when focused,
-so the IME's candidate window follows the input box.
+so the IME's candidate window follows the input box. The host re-arms SDL's
+text input after the window exists, because `lv_sdl_window_create()` calls
+`SDL_StartTextInput()` before there is a window for the X11 backend to bind
+the IME's input context to — without that, plain typing still works but an
+IME's composed text never arrives.
+
+`<spinbox>` accepts typed digits: a digit overwrites the digit under the
+cursor and the cursor moves one place right, so the configured digit format
+is preserved. Click a digit (or use `←`/`→`) to choose where to type; `↑`/`↓`
+step the selected digit.
+
+## Mouse wheel
+
+The wheel scrolls the innermost scrollable container **under the pointer**,
+and hands the gesture to the next scrollable ancestor once that container
+reaches its end — so a list inside a scrolling page behaves the way it does
+in a browser. LVGL's own SDL wheel driver is an encoder that drives the focus
+group instead, which would scroll whatever is focused rather than what the
+cursor is over; the host resolves the target geometrically instead.
+
+## Window title
+
+```js
+import { setWindowTitle } from "./js/framework.js";
+setWindowTitle("My App");        // default without this call: "LVGL Simulator"
+```
+
+Returns `false` if there is no display yet. One caveat on X11: a **non-ASCII**
+title only reliably reaches `WM_NAME`. SDL sets `_NET_WM_NAME` — the property
+modern window managers actually display — through
+`Xutf8TextListToTextProperty`, which needs a locale Xlib supports; the common
+`LANG=C.UTF-8` is *not* one of them, so the titlebar keeps the old text while
+`WM_NAME` updates. Use an ASCII title, or run under a real UTF-8 locale such
+as `en_US.UTF-8`.
 
 ## TypeScript support
 
@@ -587,7 +645,7 @@ npx -y -p typescript@5 tsc --strict --target ES2020 --lib ES2020,DOM \
 | --------------------- | ------------------------------------------------ |
 | `examples/showcase`   | **The core demo** — all 31 host tags, light/dark themes + runtime tokens, CJK role fonts, image family, on-screen keyboard, chart/menu/msgbox, animation engine. Interactive by default; `STONEGUI_SHOWCASE_SMOKE=1` runs the scripted regression |
 | `examples/jsx`        | JSX + esbuild toolchain — widget showcase via real JSX (transpiled) |
-| `examples/test`       | Framework / theme / layout / input / keyboard — 534 assertions |
+| `examples/test`       | Framework / theme / layout / input / keyboard — 537 assertions |
 
 ### `examples/jsx` — JSX (React/Vue style)
 
@@ -608,23 +666,18 @@ committed so the demo runs without installing anything; you only need
 
 ## Status
 
-LVGL 9.x + QuickJS + SDL2 on Linux.
+Linux/X11 only, on LVGL 9.2.2 + QuickJS + SDL2. Everything above this section
+is implemented and exercised by `examples/showcase`.
 
-**Implemented:** 31 host tags (incl. on-screen `keyboard`, `<animimg>` loops
-and `<imagebutton>` per-state PNGs via the new `loadImage` handle system),
-style props with pseudo-states (default/hover/focus/pressed/checked/disabled)
-and per-part `partStyles`, a self-contained (`parent = NULL`) Vue Element Plus
-light+dark theme with typed runtime tokens (`setTheme()` /
-`setThemeToken()`) and `"$token"` live colour references, selector-aware
-resolved-style getters, reactive signals + effects + memos + owner tree,
-`<Show>` / keyed `<For>`, CJK auto-discovery (`setDefaultFont()` zero-arg,
-14/16/20/24 role sizes), `loadFontSizes()`, runtime
-TTF/CJK fonts with IME placement, clipboard API (`clipboard.read/write`),
-Ctrl+A/C/V/X/Home/End shortcuts, full `<input>` props (maxLength /
-acceptedChars / password / align / textSelection / cursorPos), keyboard focus
-group, animation API, PNG/JPG/BMP image decoders, ES module loading,
-FetchContent build, clean SIGINT/SIGTERM/SDL_QUIT shutdown, inotify-driven
-hot reload, TypeScript declarations.
+**Not supported:** colour emoji — the Tiny-TTF text stack cannot decode
+colour-glyph tables, so emoji render as tofu regardless of the font
+installed (see [Emoji are not supported](#emoji-are-not-supported)).
+
+**No automated gates.** There is no CI, formatter, linter or regression
+runner — `.github/`, `scripts/` and `tools/` were all removed deliberately.
+Correctness rests on running `examples/test` (537 assertions) and the
+showcase smoke bundle by hand; nothing checks theme token-registry drift or
+the hex values in `doc/theme.md` any more.
 
 **Planned:** Wayland backend, framework adapters (Solid/Preact), atom-interned
 `js_setProperty`, DevTools / signal inspector, remaining LVGL widgets

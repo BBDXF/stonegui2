@@ -24,7 +24,7 @@ examples/showcase         *the* core demo — all 31 host tags, light/dark
                           regression (prints SHOWCASE SMOKE PASSED, exit 0).
                           Image assets live in examples/showcase/assets/
 examples/jsx              JSX demo — must be transpiled with esbuild
-examples/test             framework + theme/layout/input/keyboard (534 assertions)
+examples/test             framework + theme/layout/input/keyboard (537 assertions)
 doc/prompts.md            ORIGINAL DESIGN DOC, ARCHIVED with banner
 CMakeLists.txt            pins LVGL v9.2.2 + QuickJS commit 4c722ce
                           (VERSION 2025-09-13) via FetchContent →
@@ -46,8 +46,6 @@ cmake -S . -B build && cmake --build build      # produces ./build/stonegui
 ./build/stonegui                                # runs examples/showcase/app.js
 ./build/stonegui examples/jsx/app.js            # other bundle
 ./build/stonegui --no-watch examples/test/app.js  # disable hot reload
-./scripts/run_regression.sh                     # canonical full regression
-./test_jsx.sh                                   # JSX-focused build/run entry point
 ```
 
 - Requires `pkg-config sdl2`. Linux/X11 (SDL2) only; Wayland still planned.
@@ -56,20 +54,21 @@ cmake -S . -B build && cmake --build build      # produces ./build/stonegui
 - After editing `examples/jsx/app.jsx`, regenerate `app.js` via `npm run build`
   inside `examples/jsx/` (esbuild). `app.js` is committed so the demo runs
   without `npm install`; `node_modules/` and `package-lock.json` are gitignored.
-- **No formatter, no linter, no CI.** `.github/` was deleted deliberately —
-  the canonical regression is run by hand:
+- **No formatter, no linter, no CI, no regression runner.** `.github/` was
+  deleted deliberately, and `scripts/` + `tools/` were removed later. Verify a
+  change by running the bundles yourself:
 
   ```sh
-  ./scripts/run_regression.sh
-  ./scripts/run_regression.sh --skip-jsx-build  # repeat run without npm
+  ./build/stonegui --no-watch examples/test/app.js    # 537 assertions, exit 0
+  STONEGUI_SHOWCASE_SMOKE=1 ./build/stonegui --no-watch examples/showcase/app.js
+  npx -y -p typescript@5 tsc --strict --target ES2020 --lib ES2020,DOM \
+      --noEmit js/framework.d.ts
   ```
 
-  The runner requires exit 0 plus named pass markers from the finite assertion
-  and showcase-smoke bundles; only its explicitly classified interactive bundles
-  may pass with timeout status 143. Before the bundles it gates on
-  `tools/verify_theme_token_parity.mjs` (the token registries in `sg_theme.h`,
-  `sg_theme.c` and `framework.d.ts` must agree) and it runs the strict
-  declaration check (`tsc --noEmit js/framework.d.ts`).
+  The two finite bundles must exit 0 AND print their marker (`ALL TESTS
+  PASSED` / `SHOWCASE SMOKE PASSED`) — exit 0 alone is not proof. The
+  interactive `jsx` / `showcase` bundles never exit on their own; run them
+  under `timeout` and treat status 143 as success.
 
 ## Adding a widget / prop / event (multi-file change)
 
@@ -158,16 +157,11 @@ The legacy flat names (`primary`, `primary_dark`, `on_primary`, `secondary`,
 `radius_btn` / `radius_field` are independent fields defaulting to
 `radius_base`. `doc/theme.md` is the authoritative table with exact hexes.
 
-Three tools guard the theme, each a different axis:
-- `tools/verify_theme_tokens.mjs --check` — the hex values in `doc/theme.md`
-  match `tools/theme_tokens.expected.json` (colour correctness).
-- `tools/verify_theme_token_parity.mjs` — the token *registries* in
-  `sg_theme.h`, `sg_theme.c` and `framework.d.ts` list the same names/kinds
-  (no drift when adding a token). This one runs inside `run_regression.sh`.
-- `tools/verify_theme_coverage_mutation.sh` — mutation test: builds a throwaway
-  copy, flips five `sg_theme.c` style rules and asserts `examples/test` catches
-  each (proves the coverage assertions aren't vacuous). Run by hand; slow
-  because it recompiles.
+The theme used to be guarded by three generated checks (hex-value
+correctness, token-registry parity across the three files, and a mutation test
+proving the coverage assertions were not vacuous). They lived in `tools/` and
+have been removed, so **nothing enforces any of those three axes now** — the
+only remaining signal is `examples/test` itself.
 
 An unknown name returns `SG_THEME_TOKEN_UNKNOWN` and a kind mismatch returns
 `SG_THEME_TOKEN_WRONG_KIND`; both surface to JS as a `TypeError`. The same
@@ -175,8 +169,8 @@ split exists in `js/framework.d.ts` as `ColorThemeTokenName` vs
 `IntegerThemeTokenName`, so `setThemeToken` overloads reject the wrong value
 kind at compile time. **Adding a token means editing `sg_theme.h`, the
 registry in `sg_theme.c`, `doc/theme.md` and `framework.d.ts` together** —
-`tools/verify_theme_token_parity.mjs` (run by `run_regression.sh`) fails the
-build if any of those three registries drift out of sync.
+nothing checks this any more, so a name or kind added to one file and not the
+others drifts silently.
 
 Style props may reference a colour token live with `"$name"` on
 `backgroundColor`, `borderColor` and `textColor` only (`COLOR_STYLE_PROPERTIES`
@@ -563,8 +557,9 @@ never hardcode an absolute path, the repo moves.
 - **Atom-interned `js_setProperty`** — currently a ~50-branch `strcmp` chain
   per call. Not yet profiled as a bottleneck.
 - **DevTools / signal inspector** — none.
-- **Formatter / linter / CI** — none. `.github/` was removed deliberately;
-  `scripts/run_regression.sh` is the whole regression gate.
+- **Formatter / linter / CI / regression runner** — none. `.github/`,
+  `scripts/` and `tools/` were all removed deliberately; `examples/test` run by
+  hand is the whole gate.
 - **Still-unbound LVGL widgets** compiled into this build: `canvas`,
   `tileview`, `win`. Each needs an imperative shape that doesn't map
   cleanly to the declarative model (pixel buffer / page-management /
